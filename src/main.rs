@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs, io,
     path::{Path, PathBuf},
 };
@@ -67,6 +67,12 @@ struct DdcCiMapping {
     device: PathBuf,
     connector: Option<String>,
     output: Option<String>,
+}
+
+#[derive(Debug)]
+enum BrightnessDevice {
+    Backlight(BacklightMapping),
+    DdcCi(DdcCiMapping),
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -168,6 +174,24 @@ fn map_ddcci_to_outputs() -> io::Result<Vec<DdcCiMapping>> {
     )
 }
 
+fn brightness_devices() -> io::Result<BTreeMap<String, BrightnessDevice>> {
+    let mut devices = BTreeMap::new();
+
+    for mapping in map_backlights_to_connectors()? {
+        devices.insert(mapping.output.clone(), BrightnessDevice::Backlight(mapping));
+    }
+
+    for mapping in map_ddcci_to_outputs()? {
+        let name = mapping
+            .output
+            .clone()
+            .unwrap_or_else(|| mapping.i2c_bus.clone());
+        devices.insert(name, BrightnessDevice::DdcCi(mapping));
+    }
+
+    Ok(devices)
+}
+
 fn map_ddcci_to_outputs_from(
     drm_path: &Path,
     i2c_dev_path: &Path,
@@ -209,8 +233,7 @@ fn discover_ddcci_devices_from(
 ) -> io::Result<Vec<DdcCiDevice>> {
     let mut devices = Vec::new();
 
-    for entry in fs::read_dir(i2c_dev_path)? {
-        let entry = entry?;
+    for entry in read_dir_optional(i2c_dev_path)? {
         let i2c_bus = entry.file_name().to_string_lossy().into_owned();
 
         if !is_i2c_bus_name(&i2c_bus) {
@@ -312,8 +335,7 @@ fn map_backlights_to_connectors_from(
 fn drm_connectors(path: &Path) -> io::Result<Vec<DrmConnector>> {
     let mut connectors = Vec::new();
 
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
+    for entry in read_dir_optional(path)? {
         let name = entry.file_name().to_string_lossy().into_owned();
 
         if is_drm_connector_name(&name) {
@@ -330,8 +352,7 @@ fn drm_connectors(path: &Path) -> io::Result<Vec<DrmConnector>> {
 fn backlight_devices(path: &Path) -> io::Result<Vec<BacklightDevice>> {
     let mut devices = Vec::new();
 
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
+    for entry in read_dir_optional(path)? {
         let name = entry.file_name().to_string_lossy().into_owned();
 
         devices.push(BacklightDevice {
@@ -341,6 +362,14 @@ fn backlight_devices(path: &Path) -> io::Result<Vec<BacklightDevice>> {
     }
 
     Ok(devices)
+}
+
+fn read_dir_optional(path: &Path) -> io::Result<Vec<fs::DirEntry>> {
+    match fs::read_dir(path) {
+        Ok(entries) => entries.collect(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
 }
 
 fn is_drm_connector_name(name: &str) -> bool {
@@ -456,27 +485,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    for mapping in map_backlights_to_connectors()? {
-        println!(
-            "backlight {} -> {} [{}] ({:?})",
-            mapping.backlight, mapping.output, mapping.connector, mapping.method
-        );
-    }
-
-    for mapping in map_ddcci_to_outputs()? {
-        match (&mapping.output, &mapping.connector) {
-            (Some(output), Some(connector)) => println!(
-                "ddc/ci {} ({}) -> {} [{}]",
-                mapping.i2c_bus,
-                mapping.device.display(),
-                output,
-                connector
+    for (name, device) in brightness_devices()? {
+        match device {
+            BrightnessDevice::Backlight(mapping) => println!(
+                "backlight {} -> {} [{}] ({:?})",
+                mapping.backlight, name, mapping.connector, mapping.method
             ),
-            _ => println!(
-                "ddc/ci {} ({}) -> unmapped",
-                mapping.i2c_bus,
-                mapping.device.display()
-            ),
+            BrightnessDevice::DdcCi(mapping) => match mapping.connector {
+                Some(connector) => println!(
+                    "ddc/ci {} ({}) -> {} [{}]",
+                    mapping.i2c_bus,
+                    mapping.device.display(),
+                    name,
+                    connector
+                ),
+                None => println!(
+                    "ddc/ci {} ({}) -> unmapped",
+                    mapping.i2c_bus,
+                    mapping.device.display()
+                ),
+            },
         }
     }
 
