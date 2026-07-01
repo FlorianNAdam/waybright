@@ -20,6 +20,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     List,
+    FocusedOutput,
     Get {
         name: String,
     },
@@ -278,10 +279,19 @@ fn print_brightness_device(name: &str, device: &BrightnessDevice) {
     }
 }
 
+fn resolve_device_name(name: &str) -> io::Result<String> {
+    if name == "@focused" {
+        return waybright_focus::focused_output();
+    }
+
+    Ok(name.to_owned())
+}
+
 fn set_device_brightness(name: &str, percent: &str) -> Result<(), Box<dyn Error>> {
+    let name = resolve_device_name(name)?;
     let change = parse_brightness_change(percent)?;
     let devices = brightness_devices()?;
-    let Some(device) = devices.get(name) else {
+    let Some(device) = devices.get(&name) else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!("no brightness device named {name}"),
@@ -294,8 +304,9 @@ fn set_device_brightness(name: &str, percent: &str) -> Result<(), Box<dyn Error>
 }
 
 fn get_device_brightness(name: &str) -> Result<(), Box<dyn Error>> {
+    let name = resolve_device_name(name)?;
     let devices = brightness_devices()?;
-    let Some(device) = devices.get(name) else {
+    let Some(device) = devices.get(&name) else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!("no brightness device named {name}"),
@@ -308,9 +319,15 @@ fn get_device_brightness(name: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn print_focused_output() -> Result<(), Box<dyn Error>> {
+    println!("{}", waybright_focus::focused_output()?);
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     match Cli::parse().command.unwrap_or(Command::List) {
         Command::List => list_devices()?,
+        Command::FocusedOutput => print_focused_output()?,
         Command::Get { name } => get_device_brightness(&name)?,
         Command::Set { name, percent } => set_device_brightness(&name, &percent)?,
     }

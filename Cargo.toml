@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "waybright-cli",
+    "waybright-focus",
     "waybright-lib",
 ]
 resolver = "3"
