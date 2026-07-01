@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use clap::{Parser, Subcommand};
 use ddc::{Ddc, Edid};
 use wayland_client::{
     Connection, Dispatch, QueueHandle,
@@ -13,6 +14,19 @@ use wayland_client::{
 
 struct State {
     outputs: Vec<Output>,
+}
+
+#[derive(Parser)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    List,
+    Get { name: String },
+    Set { name: String, percent: String },
 }
 
 struct Output {
@@ -31,9 +45,16 @@ struct Output {
 #[derive(Debug)]
 struct BacklightMapping {
     backlight: String,
+    path: PathBuf,
     connector: String,
     output: String,
     method: BacklightMappingMethod,
+}
+
+#[derive(Debug)]
+struct BrightnessValue {
+    current: u32,
+    max: u32,
 }
 
 #[derive(Debug)]
@@ -73,6 +94,36 @@ struct DdcCiMapping {
 enum BrightnessDevice {
     Backlight(BacklightMapping),
     DdcCi(DdcCiMapping),
+}
+
+impl BrightnessDevice {
+    fn brightness(&self) -> io::Result<BrightnessValue> {
+        match self {
+            BrightnessDevice::Backlight(mapping) => read_backlight_brightness(&mapping.path),
+            BrightnessDevice::DdcCi(mapping) => read_ddcci_brightness(&mapping.device),
+        }
+    }
+
+    fn set_brightness_percent(&self, percent: u8) -> io::Result<()> {
+        match self {
+            BrightnessDevice::Backlight(mapping) => {
+                set_backlight_brightness_percent(&mapping.path, percent)
+            }
+            BrightnessDevice::DdcCi(mapping) => {
+                set_ddcci_brightness_percent(&mapping.device, percent)
+            }
+        }
+    }
+}
+
+impl BrightnessValue {
+    fn percent(&self) -> u32 {
+        if self.max == 0 {
+            return 0;
+        }
+
+        self.current * 100 / self.max
+    }
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -323,6 +374,7 @@ fn map_backlights_to_connectors_from(
 
         mappings.push(BacklightMapping {
             backlight: backlight.name,
+            path: backlight.path,
             output: connector_output_name(&connector).to_owned(),
             connector,
             method,
@@ -448,13 +500,70 @@ fn read_ddc_edid(ddc: &mut ddc_i2c::I2cDeviceDdc) -> io::Result<Vec<u8>> {
     Ok(edid)
 }
 
-fn is_valid_base_edid(edid: &[u8]) -> bool {
-    edid.len() == 128
-        && edid.starts_with(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00])
-        && edid.iter().fold(0_u8, |sum, byte| sum.wrapping_add(*byte)) == 0
+fn read_backlight_brightness(path: &Path) -> io::Result<BrightnessValue> {
+    Ok(BrightnessValue {
+        current: read_u32(path.join("brightness"))?,
+        max: read_u32(path.join("max_brightness"))?,
+    })
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn set_backlight_brightness_percent(path: &Path, percent: u8) -> io::Result<()> {
+    let max = read_u32(path.join("max_brightness"))?;
+    let value = percent_to_value(percent, max);
+    fs::write(path.join("brightness"), format!("{value}\n"))
+}
+
+fn read_ddcci_brightness(path: &Path) -> io::Result<BrightnessValue> {
+    let mut ddc = ddc_i2c::from_i2c_device(path)?;
+    let value = ddc.get_vcp_feature(0x10).map_err(io::Error::other)?;
+
+    Ok(BrightnessValue {
+        current: u32::from(value.value()),
+        max: u32::from(value.maximum()),
+    })
+}
+
+fn set_ddcci_brightness_percent(path: &Path, percent: u8) -> io::Result<()> {
+    let mut ddc = ddc_i2c::from_i2c_device(path)?;
+    let max = u32::from(
+        ddc.get_vcp_feature(0x10)
+            .map_err(io::Error::other)?
+            .maximum(),
+    );
+    let value = percent_to_value(percent, max);
+    ddc.set_vcp_feature(0x10, value as u16)
+        .map_err(io::Error::other)
+}
+
+fn read_u32(path: impl AsRef<Path>) -> io::Result<u32> {
+    let value = fs::read_to_string(path)?;
+    value
+        .trim()
+        .parse()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn percent_to_value(percent: u8, max: u32) -> u32 {
+    (u32::from(percent) * max).div_ceil(100)
+}
+
+fn parse_percent(value: &str) -> io::Result<u8> {
+    let percent = value
+        .trim_end_matches('%')
+        .parse::<u8>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+
+    if percent > 100 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "brightness percent must be between 0 and 100",
+        ));
+    }
+
+    Ok(percent)
+}
+
+fn list_devices() -> Result<(), Box<dyn Error>> {
     let conn = Connection::connect_to_env()?;
     let display = conn.display();
     let mut event_queue = conn.new_event_queue();
@@ -467,45 +576,117 @@ fn main() -> Result<(), Box<dyn Error>> {
     event_queue.roundtrip(&mut state)?;
     event_queue.roundtrip(&mut state)?;
 
+    let mut devices = brightness_devices()?;
+
     for output in state.outputs {
-        println!("{}", output.name.as_deref().unwrap_or("unknown"));
+        let name = output.name.as_deref().unwrap_or("unknown");
+        println!("{name}");
         println!(
-            "\tdescription: {}",
+            "  description: {}",
             output.description.as_deref().unwrap_or("unknown")
         );
-        println!("\tmake: {}", output.make);
-        println!("\tmodel: {}", output.model);
+        println!("  make: {}", output.make);
+        println!("  model: {}", output.model);
         println!(
-            "\tphysical size: {}x{}mm",
+            "  physical size: {}x{}mm",
             output.physical_width, output.physical_height
         );
 
         if let (Some(width), Some(height)) = (output.current_width, output.current_height) {
-            println!("\tcurrent mode: {width}x{height}");
+            println!("  current mode: {width}x{height}");
+        }
+
+        if let Some(device) = devices.remove(name) {
+            print_brightness_device(name, &device);
         }
     }
 
-    for (name, device) in brightness_devices()? {
-        match device {
-            BrightnessDevice::Backlight(mapping) => println!(
-                "backlight {} -> {} [{}] ({:?})",
-                mapping.backlight, name, mapping.connector, mapping.method
-            ),
-            BrightnessDevice::DdcCi(mapping) => match mapping.connector {
-                Some(connector) => println!(
-                    "ddc/ci {} ({}) -> {} [{}]",
-                    mapping.i2c_bus,
-                    mapping.device.display(),
-                    name,
-                    connector
-                ),
-                None => println!(
-                    "ddc/ci {} ({}) -> unmapped",
-                    mapping.i2c_bus,
-                    mapping.device.display()
-                ),
-            },
+    if !devices.is_empty() {
+        println!("unmapped brightness devices");
+
+        for (name, device) in devices {
+            println!("{name}");
+            print_brightness_device(&name, &device);
         }
+    }
+
+    Ok(())
+}
+
+fn print_brightness_device(name: &str, device: &BrightnessDevice) {
+    let brightness = device.brightness();
+    let brightness = brightness
+        .as_ref()
+        .map(|brightness| format!("{}%", brightness.percent()))
+        .unwrap_or_else(|error| format!("unknown ({error})"));
+
+    println!("  brightness: {brightness}");
+
+    match device {
+        BrightnessDevice::Backlight(mapping) => {
+            println!("  brightness method: backlight");
+            println!("  backlight: {}", mapping.backlight);
+            println!("  connector: {}", mapping.connector);
+            println!("  mapping method: {:?}", mapping.method);
+        }
+        BrightnessDevice::DdcCi(mapping) => match &mapping.connector {
+            Some(connector) => {
+                println!("  brightness method: ddc/ci");
+                println!("  i2c bus: {}", mapping.i2c_bus);
+                println!("  device: {}", mapping.device.display());
+                println!("  connector: {connector}");
+            }
+            None => {
+                println!("  brightness method: ddc/ci");
+                println!("  i2c bus: {}", mapping.i2c_bus);
+                println!("  device: {}", mapping.device.display());
+                println!("  output: {name}");
+            }
+        },
+    }
+}
+
+fn set_device_brightness(name: &str, percent: &str) -> Result<(), Box<dyn Error>> {
+    let percent = parse_percent(percent)?;
+    let devices = brightness_devices()?;
+    let Some(device) = devices.get(name) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no brightness device named {name}"),
+        )
+        .into());
+    };
+
+    device.set_brightness_percent(percent)?;
+    Ok(())
+}
+
+fn get_device_brightness(name: &str) -> Result<(), Box<dyn Error>> {
+    let devices = brightness_devices()?;
+    let Some(device) = devices.get(name) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no brightness device named {name}"),
+        )
+        .into());
+    };
+
+    let brightness = device.brightness()?;
+    println!("{}%", brightness.percent());
+    Ok(())
+}
+
+fn is_valid_base_edid(edid: &[u8]) -> bool {
+    edid.len() == 128
+        && edid.starts_with(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00])
+        && edid.iter().fold(0_u8, |sum, byte| sum.wrapping_add(*byte)) == 0
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    match Cli::parse().command.unwrap_or(Command::List) {
+        Command::List => list_devices()?,
+        Command::Get { name } => get_device_brightness(&name)?,
+        Command::Set { name, percent } => set_device_brightness(&name, &percent)?,
     }
 
     Ok(())
