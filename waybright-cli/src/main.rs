@@ -2,14 +2,6 @@ use std::{error::Error, io};
 
 use clap::{Parser, Subcommand};
 use waybright_lib::{BrightnessChange, BrightnessControl, BrightnessDevice, brightness_devices};
-use wayland_client::{
-    Connection, Dispatch, QueueHandle,
-    protocol::{wl_output, wl_registry},
-};
-
-struct State {
-    outputs: Vec<Output>,
-}
 
 #[derive(Parser)]
 struct Cli {
@@ -29,103 +21,6 @@ enum Command {
         #[arg(allow_hyphen_values = true)]
         percent: String,
     },
-}
-
-struct Output {
-    _wl_output: wl_output::WlOutput,
-    global_name: u32,
-    name: Option<String>,
-    description: Option<String>,
-    make: String,
-    model: String,
-    physical_width: i32,
-    physical_height: i32,
-    current_width: Option<i32>,
-    current_height: Option<i32>,
-}
-
-impl Dispatch<wl_registry::WlRegistry, ()> for State {
-    fn event(
-        state: &mut Self,
-        registry: &wl_registry::WlRegistry,
-        event: wl_registry::Event,
-        _: &(),
-        _: &Connection,
-        qh: &QueueHandle<Self>,
-    ) {
-        if let wl_registry::Event::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
-            if interface == "wl_output" {
-                let wl_output =
-                    registry.bind::<wl_output::WlOutput, _, _>(name, version.min(4), qh, name);
-
-                state.outputs.push(Output {
-                    _wl_output: wl_output,
-                    global_name: name,
-                    name: None,
-                    description: None,
-                    make: String::new(),
-                    model: String::new(),
-                    physical_width: 0,
-                    physical_height: 0,
-                    current_width: None,
-                    current_height: None,
-                });
-            }
-        }
-    }
-}
-
-impl Dispatch<wl_output::WlOutput, u32> for State {
-    fn event(
-        state: &mut Self,
-        _: &wl_output::WlOutput,
-        event: wl_output::Event,
-        global_name: &u32,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        let Some(output) = state
-            .outputs
-            .iter_mut()
-            .find(|output| output.global_name == *global_name)
-        else {
-            return;
-        };
-
-        match event {
-            wl_output::Event::Geometry {
-                physical_width,
-                physical_height,
-                make,
-                model,
-                ..
-            } => {
-                output.physical_width = physical_width;
-                output.physical_height = physical_height;
-                output.make = make;
-                output.model = model;
-            }
-            wl_output::Event::Name { name } => output.name = Some(name),
-            wl_output::Event::Description { description } => output.description = Some(description),
-            wl_output::Event::Mode {
-                flags,
-                width,
-                height,
-                ..
-            } => {
-                if matches!(flags.into_result(), Ok(wl_output::Mode::Current)) {
-                    output.current_width = Some(width);
-                    output.current_height = Some(height);
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 fn parse_brightness_change(value: &str) -> io::Result<BrightnessChange> {
@@ -197,50 +92,9 @@ fn parse_factor(value: &str) -> io::Result<u16> {
 }
 
 fn list_devices() -> Result<(), Box<dyn Error>> {
-    let conn = Connection::connect_to_env()?;
-    let display = conn.display();
-    let mut event_queue = conn.new_event_queue();
-    let qh = event_queue.handle();
-    let _registry = display.get_registry(&qh, ());
-
-    let mut state = State {
-        outputs: Vec::new(),
-    };
-    event_queue.roundtrip(&mut state)?;
-    event_queue.roundtrip(&mut state)?;
-
-    let mut devices = brightness_devices()?;
-
-    for output in state.outputs {
-        let name = output.name.as_deref().unwrap_or("unknown");
+    for (name, device) in brightness_devices()? {
         println!("{name}");
-        println!(
-            "  description: {}",
-            output.description.as_deref().unwrap_or("unknown")
-        );
-        println!("  make: {}", output.make);
-        println!("  model: {}", output.model);
-        println!(
-            "  physical size: {}x{}mm",
-            output.physical_width, output.physical_height
-        );
-
-        if let (Some(width), Some(height)) = (output.current_width, output.current_height) {
-            println!("  current mode: {width}x{height}");
-        }
-
-        if let Some(device) = devices.remove(name) {
-            print_brightness_device(name, &device);
-        }
-    }
-
-    if !devices.is_empty() {
-        println!("unmapped brightness devices");
-
-        for (name, device) in devices {
-            println!("{name}");
-            print_brightness_device(&name, &device);
-        }
+        print_brightness_device(&name, &device);
     }
 
     Ok(())
