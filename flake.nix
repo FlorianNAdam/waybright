@@ -81,6 +81,7 @@
               rustc
               rustfmt
               libxkbcommon
+              eudev
             ];
 
             nativeBuildInputs = with pkgs; [

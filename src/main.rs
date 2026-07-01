@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ddc::{Ddc, Edid};
 use wayland_client::{
     Connection, Dispatch, QueueHandle,
     protocol::{wl_output, wl_registry},
@@ -51,6 +52,21 @@ struct DrmConnector {
 struct BacklightDevice {
     name: String,
     path: PathBuf,
+}
+
+#[derive(Debug)]
+struct DdcCiDevice {
+    i2c_bus: String,
+    device: PathBuf,
+    edid: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct DdcCiMapping {
+    i2c_bus: String,
+    device: PathBuf,
+    connector: Option<String>,
+    output: Option<String>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -144,6 +160,82 @@ fn map_backlights_to_connectors() -> io::Result<Vec<BacklightMapping>> {
     )
 }
 
+fn map_ddcci_to_outputs() -> io::Result<Vec<DdcCiMapping>> {
+    map_ddcci_to_outputs_from(
+        Path::new("/sys/class/drm"),
+        Path::new("/sys/class/i2c-dev"),
+        Path::new("/dev"),
+    )
+}
+
+fn map_ddcci_to_outputs_from(
+    drm_path: &Path,
+    i2c_dev_path: &Path,
+    dev_path: &Path,
+) -> io::Result<Vec<DdcCiMapping>> {
+    let devices = discover_ddcci_devices_from(i2c_dev_path, dev_path)?;
+    let connectors = drm_connectors(drm_path)?;
+    let mut connectors_by_edid = unique_edids(connectors.iter().filter_map(|connector| {
+        read_base_edid(connector.path.join("edid"))
+            .ok()
+            .map(|edid| (edid, connector.name.clone()))
+    }));
+
+    Ok(devices
+        .into_iter()
+        .map(|device| {
+            let connector = device
+                .edid
+                .as_ref()
+                .and_then(|edid| connectors_by_edid.remove(edid));
+            let output = connector
+                .as_deref()
+                .map(connector_output_name)
+                .map(str::to_owned);
+
+            DdcCiMapping {
+                i2c_bus: device.i2c_bus,
+                device: device.device,
+                connector,
+                output,
+            }
+        })
+        .collect())
+}
+
+fn discover_ddcci_devices_from(
+    i2c_dev_path: &Path,
+    dev_path: &Path,
+) -> io::Result<Vec<DdcCiDevice>> {
+    let mut devices = Vec::new();
+
+    for entry in fs::read_dir(i2c_dev_path)? {
+        let entry = entry?;
+        let i2c_bus = entry.file_name().to_string_lossy().into_owned();
+
+        if !is_i2c_bus_name(&i2c_bus) {
+            continue;
+        }
+
+        let device = dev_path.join(&i2c_bus);
+        let Ok(mut ddc) = ddc_i2c::from_i2c_device(&device) else {
+            continue;
+        };
+
+        if ddc.get_vcp_feature(0x10).is_err() {
+            continue;
+        };
+
+        devices.push(DdcCiDevice {
+            i2c_bus,
+            device,
+            edid: read_ddc_edid(&mut ddc).ok(),
+        });
+    }
+
+    Ok(devices)
+}
+
 fn map_backlights_to_connectors_from(
     drm_path: &Path,
     backlight_path: &Path,
@@ -177,7 +269,7 @@ fn map_backlights_to_connectors_from(
     }
 
     let mut connectors_by_edid = unique_edids(connectors.iter().filter_map(|connector| {
-        read_non_empty(connector.path.join("edid"))
+        read_base_edid(connector.path.join("edid"))
             .ok()
             .map(|edid| (edid, connector.name.clone()))
     }));
@@ -187,7 +279,7 @@ fn map_backlights_to_connectors_from(
             continue;
         }
 
-        let Ok(edid) = read_non_empty(backlight.path.join("device/edid")) else {
+        let Ok(edid) = read_base_edid(backlight.path.join("device/edid")) else {
             continue;
         };
 
@@ -263,6 +355,14 @@ fn is_drm_connector_name(name: &str) -> bool {
     !card.is_empty() && card.bytes().all(|byte| byte.is_ascii_digit()) && !connector.is_empty()
 }
 
+fn is_i2c_bus_name(name: &str) -> bool {
+    let Some(bus) = name.strip_prefix("i2c-") else {
+        return false;
+    };
+
+    !bus.is_empty() && bus.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn connector_output_name(name: &str) -> &str {
     name.strip_prefix("card")
         .and_then(|rest| rest.split_once('-'))
@@ -294,6 +394,35 @@ fn read_non_empty(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     }
 
     Ok(bytes)
+}
+
+fn read_base_edid(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    let mut edid = read_non_empty(path)?;
+    edid.truncate(128);
+
+    if !is_valid_base_edid(&edid) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid edid"));
+    }
+
+    Ok(edid)
+}
+
+fn read_ddc_edid(ddc: &mut ddc_i2c::I2cDeviceDdc) -> io::Result<Vec<u8>> {
+    let mut edid = vec![0_u8; 128];
+    let len = ddc.read_edid(0, &mut edid).map_err(io::Error::other)?;
+    edid.truncate(len);
+
+    if !is_valid_base_edid(&edid) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid edid"));
+    }
+
+    Ok(edid)
+}
+
+fn is_valid_base_edid(edid: &[u8]) -> bool {
+    edid.len() == 128
+        && edid.starts_with(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00])
+        && edid.iter().fold(0_u8, |sum, byte| sum.wrapping_add(*byte)) == 0
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -332,6 +461,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             "backlight {} -> {} [{}] ({:?})",
             mapping.backlight, mapping.output, mapping.connector, mapping.method
         );
+    }
+
+    for mapping in map_ddcci_to_outputs()? {
+        match (&mapping.output, &mapping.connector) {
+            (Some(output), Some(connector)) => println!(
+                "ddc/ci {} ({}) -> {} [{}]",
+                mapping.i2c_bus,
+                mapping.device.display(),
+                output,
+                connector
+            ),
+            _ => println!(
+                "ddc/ci {} ({}) -> unmapped",
+                mapping.i2c_bus,
+                mapping.device.display()
+            ),
+        }
     }
 
     Ok(())
