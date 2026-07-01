@@ -80,6 +80,11 @@
               cargo
               rustc
               rustfmt
+              libxkbcommon
+            ];
+
+            nativeBuildInputs = with pkgs; [
+              pkg-config
             ];
 
             packages =
