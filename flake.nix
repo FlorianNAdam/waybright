@@ -25,7 +25,7 @@
         { config, pkgs, ... }:
         let
           cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-          packageName = cargoToml.package.name;
+          packageName = "waybright";
           package = import ./default.nix { inherit pkgs naersk; };
           cargo-lock = pkgs.writeShellApplication {
             name = "cargo-lock";

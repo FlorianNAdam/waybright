@@ -1,16 +1,13 @@
-[package]
-name = "waybright"
+[workspace]
+members = [
+    "waybright-cli",
+    "waybright-lib",
+]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "universal brightness control for wayland"
 authors = ["Florian Nalu Adam"]
-
-[dependencies]
-clap = { version = "4.6.1", features = ["derive"] }
-ddc = "0.2.2"
-ddc-i2c = { version = "0.2.2", features = ["with-linux"], default-features = false }
-tokio = { version = "1.52.3", features = ["full"] }
-wayland-client = "0.31.14"
-wayland-protocols-wlr = "0.3.12"
-zbus = { version = "5.16.0", features = ["blocking"] }

@@ -7,7 +7,7 @@ let
   naersk-lib = pkgs.callPackage naersk { };
 in
 naersk-lib.buildPackage {
-  pname = cargoToml.package.name;
-  version = cargoToml.package.version;
+  pname = "waybright";
+  version = cargoToml.workspace.package.version;
   src = ./.;
 }
