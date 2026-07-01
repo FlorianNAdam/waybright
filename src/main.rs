@@ -127,7 +127,7 @@ impl BrightnessDevice {
 
         match self {
             BrightnessDevice::Backlight(mapping) => {
-                set_backlight_brightness_percent(&mapping.path, percent)
+                set_backlight_brightness_percent(&mapping.backlight, &mapping.path, percent)
             }
             BrightnessDevice::DdcCi(mapping) => {
                 set_ddcci_brightness_percent(&mapping.device, percent)
@@ -527,10 +527,32 @@ fn read_backlight_brightness(path: &Path) -> io::Result<BrightnessValue> {
     })
 }
 
-fn set_backlight_brightness_percent(path: &Path, percent: u8) -> io::Result<()> {
+fn set_backlight_brightness_percent(backlight: &str, path: &Path, percent: u8) -> io::Result<()> {
     let max = read_u32(path.join("max_brightness"))?;
     let value = percent_to_value(percent, max);
-    fs::write(path.join("brightness"), format!("{value}\n"))
+
+    match fs::write(path.join("brightness"), format!("{value}\n")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            set_logind_brightness("backlight", backlight, value)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn set_logind_brightness(subsystem: &str, device: &str, value: u32) -> io::Result<()> {
+    let connection = zbus::blocking::Connection::system().map_err(io::Error::other)?;
+    let proxy = zbus::blocking::Proxy::new(
+        &connection,
+        "org.freedesktop.login1",
+        "/org/freedesktop/login1/session/auto",
+        "org.freedesktop.login1.Session",
+    )
+    .map_err(io::Error::other)?;
+
+    proxy
+        .call::<_, _, ()>("SetBrightness", &(subsystem, device, value))
+        .map_err(io::Error::other)
 }
 
 fn read_ddcci_brightness(path: &Path) -> io::Result<BrightnessValue> {

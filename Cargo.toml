@@ -13,3 +13,4 @@ ddc-i2c = { version = "0.2.2", features = ["with-linux"], default-features = fal
 tokio = { version = "1.52.3", features = ["full"] }
 wayland-client = "0.31.14"
 wayland-protocols-wlr = "0.3.12"
+zbus = { version = "5.16.0", features = ["blocking"] }
