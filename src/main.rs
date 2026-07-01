@@ -25,8 +25,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     List,
-    Get { name: String },
-    Set { name: String, percent: String },
+    Get {
+        name: String,
+    },
+    Set {
+        name: String,
+        #[arg(allow_hyphen_values = true)]
+        percent: String,
+    },
 }
 
 struct Output {
@@ -55,6 +61,12 @@ struct BacklightMapping {
 struct BrightnessValue {
     current: u32,
     max: u32,
+}
+
+#[derive(Debug)]
+enum BrightnessChange {
+    Absolute(u8),
+    Delta(i8),
 }
 
 #[derive(Debug)]
@@ -104,7 +116,15 @@ impl BrightnessDevice {
         }
     }
 
-    fn set_brightness_percent(&self, percent: u8) -> io::Result<()> {
+    fn set_brightness(&self, change: BrightnessChange) -> io::Result<()> {
+        let percent = match change {
+            BrightnessChange::Absolute(percent) => percent,
+            BrightnessChange::Delta(delta) => {
+                let current = self.brightness()?.percent() as i16;
+                current.saturating_add(i16::from(delta)).clamp(0, 100) as u8
+            }
+        };
+
         match self {
             BrightnessDevice::Backlight(mapping) => {
                 set_backlight_brightness_percent(&mapping.path, percent)
@@ -547,9 +567,18 @@ fn percent_to_value(percent: u8, max: u32) -> u32 {
     (u32::from(percent) * max).div_ceil(100)
 }
 
-fn parse_percent(value: &str) -> io::Result<u8> {
+fn parse_brightness_change(value: &str) -> io::Result<BrightnessChange> {
+    let value = value.trim_end_matches('%');
+
+    if let Some(delta) = value.strip_prefix('+') {
+        return parse_delta(delta).map(BrightnessChange::Delta);
+    }
+
+    if let Some(delta) = value.strip_prefix('-') {
+        return parse_delta(delta).map(|delta| BrightnessChange::Delta(-delta));
+    }
+
     let percent = value
-        .trim_end_matches('%')
         .parse::<u8>()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
 
@@ -560,7 +589,22 @@ fn parse_percent(value: &str) -> io::Result<u8> {
         ));
     }
 
-    Ok(percent)
+    Ok(BrightnessChange::Absolute(percent))
+}
+
+fn parse_delta(value: &str) -> io::Result<i8> {
+    let delta = value
+        .parse::<i8>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+
+    if delta > 100 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "brightness delta must be between -100 and 100",
+        ));
+    }
+
+    Ok(delta)
 }
 
 fn list_devices() -> Result<(), Box<dyn Error>> {
@@ -647,7 +691,7 @@ fn print_brightness_device(name: &str, device: &BrightnessDevice) {
 }
 
 fn set_device_brightness(name: &str, percent: &str) -> Result<(), Box<dyn Error>> {
-    let percent = parse_percent(percent)?;
+    let change = parse_brightness_change(percent)?;
     let devices = brightness_devices()?;
     let Some(device) = devices.get(name) else {
         return Err(io::Error::new(
@@ -657,7 +701,7 @@ fn set_device_brightness(name: &str, percent: &str) -> Result<(), Box<dyn Error>
         .into());
     };
 
-    device.set_brightness_percent(percent)?;
+    device.set_brightness(change)?;
     Ok(())
 }
 
