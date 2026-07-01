@@ -1,11 +1,11 @@
 use std::io;
+use std::time::Duration;
 
 pub(crate) fn focused_output() -> io::Result<String> {
-    let connection = zbus::blocking::Connection::session().map_err(io::Error::other)?;
-    let proxy = zbus::blocking::Proxy::new(&connection, "org.kde.KWin", "/KWin", "org.kde.KWin")
-        .map_err(io::Error::other)?;
-    let output: String = proxy
-        .call("activeOutputName", &())
+    let connection = dbus::blocking::Connection::new_session().map_err(io::Error::other)?;
+    let proxy = connection.with_proxy("org.kde.KWin", "/KWin", Duration::from_secs(2));
+    let (output,): (String,) = proxy
+        .method_call("org.kde.KWin", "activeOutputName", ())
         .map_err(io::Error::other)?;
     let output = output.trim();
 

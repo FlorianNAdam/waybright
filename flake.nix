@@ -24,7 +24,6 @@
       perSystem =
         { config, pkgs, ... }:
         let
-          cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
           packageName = "waybright";
           package = import ./default.nix { inherit pkgs naersk; };
           cargo-lock = pkgs.writeShellApplication {
@@ -82,6 +81,7 @@
               rustfmt
               libxkbcommon
               eudev
+              dbus
             ];
 
             nativeBuildInputs = with pkgs; [
