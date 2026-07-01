@@ -1,6 +1,7 @@
 use std::{error::Error, io};
 
 use clap::{Parser, Subcommand};
+use serde_json::{Map, Value, json};
 use waybright_lib::{BrightnessChange, BrightnessControl, BrightnessDevice, brightness_devices};
 
 #[derive(Parser)]
@@ -11,7 +12,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    List,
+    List {
+        #[arg(long)]
+        json: bool,
+    },
     FocusedOutput,
     Get {
         name: String,
@@ -91,13 +95,59 @@ fn parse_factor(value: &str) -> io::Result<u16> {
     Ok(factor)
 }
 
-fn list_devices() -> Result<(), Box<dyn Error>> {
-    for (name, device) in brightness_devices()? {
-        println!("{name}");
-        print_brightness_device(&name, &device);
+fn list_devices(json: bool) -> Result<(), Box<dyn Error>> {
+    let devices = brightness_devices()?;
+
+    if json {
+        print_json_devices(devices)?;
+    } else {
+        for (name, device) in devices {
+            println!("{name}");
+            print_brightness_device(&name, &device);
+        }
     }
 
     Ok(())
+}
+
+fn print_json_devices(
+    devices: std::collections::BTreeMap<String, BrightnessDevice>,
+) -> Result<(), Box<dyn Error>> {
+    let mut json_devices = Map::new();
+
+    for (name, device) in devices {
+        json_devices.insert(name.clone(), json_brightness_device(&name, &device));
+    }
+
+    println!("{}", serde_json::to_string_pretty(&json_devices)?);
+    Ok(())
+}
+
+fn json_brightness_device(name: &str, device: &BrightnessDevice) -> Value {
+    let (brightness, brightness_error) = match device.get_brightness() {
+        Ok(brightness) => (Some(brightness), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+
+    match device {
+        BrightnessDevice::Backlight(mapping) => json!({
+            "brightness": brightness,
+            "brightness_error": brightness_error,
+            "method": "backlight",
+            "backlight": mapping.backlight,
+            "connector": mapping.connector,
+            "mapping_method": format!("{:?}", mapping.method).to_lowercase(),
+        }),
+        BrightnessDevice::DdcCi(mapping) => json!({
+            "brightness": brightness,
+            "brightness_error": brightness_error,
+            "method": "ddc/ci",
+            "i2c_bus": mapping.i2c_bus,
+            "device": mapping.device,
+            "connector": mapping.connector,
+            "output": mapping.output.as_deref().unwrap_or(name),
+        }),
+    }
 }
 
 fn print_brightness_device(name: &str, device: &BrightnessDevice) {
@@ -179,8 +229,11 @@ fn print_focused_output() -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    match Cli::parse().command.unwrap_or(Command::List) {
-        Command::List => list_devices()?,
+    match Cli::parse()
+        .command
+        .unwrap_or(Command::List { json: false })
+    {
+        Command::List { json } => list_devices(json)?,
         Command::FocusedOutput => print_focused_output()?,
         Command::Get { name } => get_device_brightness(&name)?,
         Command::Set { name, percent } => set_device_brightness(&name, &percent)?,
