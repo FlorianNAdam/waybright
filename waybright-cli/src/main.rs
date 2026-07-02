@@ -192,9 +192,18 @@ fn resolve_device_name(name: &str) -> io::Result<String> {
 }
 
 fn set_device_brightness(name: &str, percent: &str) -> Result<(), Box<dyn Error>> {
-    let name = resolve_device_name(name)?;
     let change = parse_brightness_change(percent)?;
     let devices = brightness_devices()?;
+
+    if name == "@all" {
+        for device in devices.values() {
+            device.apply_brightness_change(change)?;
+        }
+
+        return Ok(());
+    }
+
+    let name = resolve_device_name(name)?;
     let Some(device) = devices.get(&name) else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,

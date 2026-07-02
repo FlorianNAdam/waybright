@@ -15,7 +15,7 @@ pub struct BrightnessValue {
     max: u32,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum BrightnessChange {
     Absolute(u8),
     Delta(i8),
@@ -36,25 +36,54 @@ pub enum BrightnessDevice {
 
 impl BrightnessDevice {
     pub fn apply_brightness_change(&self, change: BrightnessChange) -> io::Result<()> {
-        let percent = match change {
-            BrightnessChange::Absolute(percent) => percent,
-            BrightnessChange::Delta(delta) => {
-                let current = self.get_brightness()? as i16;
-                current.saturating_add(i16::from(delta)).clamp(0, 100) as u8
-            }
-            BrightnessChange::Multiply(factor) => {
-                let current = self.get_brightness()?;
-                ((current * u32::from(factor) + 50) / 100).clamp(0, 100) as u8
-            }
-            BrightnessChange::Divide(factor) => {
-                let current = self.get_brightness()?;
-                ((current * 100 + u32::from(factor) / 2) / u32::from(factor)).clamp(0, 100) as u8
-            }
+        let current = match change {
+            BrightnessChange::Absolute(_) => None,
+            BrightnessChange::Delta(_)
+            | BrightnessChange::Multiply(_)
+            | BrightnessChange::Divide(_) => Some(self.get_brightness()?),
         };
+
+        let percent = apply_percent_change(current, change);
 
         match self {
             BrightnessDevice::Backlight(mapping) => mapping.set_brightness(percent),
             BrightnessDevice::DdcCi(mapping) => mapping.set_brightness(percent),
+        }
+    }
+}
+
+fn apply_percent_change(current: Option<u32>, change: BrightnessChange) -> u8 {
+    match change {
+        BrightnessChange::Absolute(percent) => percent,
+        BrightnessChange::Delta(delta) => {
+            let current =
+                current.expect("relative brightness change requires current brightness") as i16;
+            current.saturating_add(i16::from(delta)).clamp(0, 100) as u8
+        }
+        BrightnessChange::Multiply(factor) => {
+            let current = current.expect("relative brightness change requires current brightness");
+            let percent = ((current * u32::from(factor) + 50) / 100).clamp(0, 100);
+
+            if percent == current && factor > 100 && current < 100 {
+                (current + 1) as u8
+            } else if percent == current && factor < 100 && current > 0 {
+                (current - 1) as u8
+            } else {
+                percent as u8
+            }
+        }
+        BrightnessChange::Divide(factor) => {
+            let current = current.expect("relative brightness change requires current brightness");
+            let percent =
+                ((current * 100 + u32::from(factor) / 2) / u32::from(factor)).clamp(0, 100);
+
+            if percent == current && factor > 100 && current > 0 {
+                (current - 1) as u8
+            } else if percent == current && factor < 100 && current < 100 {
+                (current + 1) as u8
+            } else {
+                percent as u8
+            }
         }
     }
 }
