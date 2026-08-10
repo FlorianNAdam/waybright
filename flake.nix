@@ -24,8 +24,20 @@
       perSystem =
         { config, pkgs, ... }:
         let
-          packageName = "waybright";
-          package = import ./default.nix { inherit pkgs naersk; };
+          packageNames = [
+            "waybright"
+            "waydark"
+            "waydim"
+            "wayfocus"
+          ];
+          workspacePackage = import ./default.nix { inherit pkgs naersk; };
+          binaryPackage =
+            packageName:
+            pkgs.runCommand "${packageName}-${workspacePackage.version}" { } ''
+              mkdir -p "$out/bin"
+              ln -s "${workspacePackage}/bin/${packageName}" "$out/bin/${packageName}"
+            '';
+          binaryPackages = pkgs.lib.genAttrs packageNames binaryPackage;
           cargo-lock = pkgs.writeShellApplication {
             name = "cargo-lock";
             runtimeInputs = with pkgs; [
@@ -45,9 +57,9 @@
           };
         in
         {
-          packages = {
-            "${packageName}" = package;
-            default = package;
+          packages = binaryPackages // {
+            workspace = workspacePackage;
+            default = binaryPackages.waybright;
           };
 
           pre-commit.settings.hooks = {

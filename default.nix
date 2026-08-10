@@ -7,7 +7,8 @@ let
   naersk-lib = pkgs.callPackage naersk { };
 in
 naersk-lib.buildPackage {
-  pname = "waybright";
+  name = "waybright-workspace";
+  pname = "waybright-workspace";
   version = cargoToml.workspace.package.version;
   src = ./.;
   nativeBuildInputs = with pkgs; [
@@ -15,6 +16,8 @@ naersk-lib.buildPackage {
   ];
   buildInputs = with pkgs; [
     dbus
+    eudev
+    libxkbcommon
     wayland
   ];
 }
