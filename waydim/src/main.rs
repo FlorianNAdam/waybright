@@ -2,7 +2,10 @@ use std::{error::Error, io};
 
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
-use waydim::{BrightnessChange, BrightnessControl, BrightnessDevice, brightness_devices};
+use waydim::{
+    BrightnessChange, BrightnessControl, BrightnessDevice, DaemonBrightnessDevice,
+    brightness_devices,
+};
 use waylevel::parse_percent_change;
 
 #[derive(Parser)]
@@ -13,6 +16,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    Daemon,
+    Refresh,
     List {
         #[arg(long)]
         json: bool,
@@ -32,6 +37,12 @@ fn parse_brightness_change(value: &str) -> io::Result<BrightnessChange> {
 }
 
 fn list_devices(json: bool) -> Result<(), Box<dyn Error>> {
+    match waydim::daemon_list_devices() {
+        Ok(devices) => return print_daemon_devices(devices, json),
+        Err(error) if daemon_unavailable(&error) => {}
+        Err(error) => return Err(error.into()),
+    }
+
     let devices = brightness_devices()?;
 
     if json {
@@ -44,6 +55,74 @@ fn list_devices(json: bool) -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn print_daemon_devices(
+    devices: Vec<DaemonBrightnessDevice>,
+    json: bool,
+) -> Result<(), Box<dyn Error>> {
+    if json {
+        let mut json_devices = Map::new();
+        for device in devices {
+            json_devices.insert(device.name.clone(), json_daemon_device(&device));
+        }
+
+        println!("{}", serde_json::to_string_pretty(&json_devices)?);
+    } else {
+        for device in devices {
+            println!("{}", device.name);
+            print_daemon_device(&device);
+        }
+    }
+
+    Ok(())
+}
+
+fn json_daemon_device(device: &DaemonBrightnessDevice) -> Value {
+    match device.method.as_str() {
+        "backlight" => json!({
+            "brightness": device.brightness,
+            "brightness_error": null,
+            "method": "backlight",
+            "backlight": device.backlight,
+            "connector": device.connector,
+            "mapping_method": device.mapping_method,
+        }),
+        "ddc/ci" => json!({
+            "brightness": device.brightness,
+            "brightness_error": null,
+            "method": "ddc/ci",
+            "i2c_bus": device.i2c_bus,
+            "device": device.device,
+            "connector": device.connector,
+        }),
+        _ => json!({
+            "brightness": device.brightness,
+            "brightness_error": null,
+            "method": device.method,
+        }),
+    }
+}
+
+fn print_daemon_device(device: &DaemonBrightnessDevice) {
+    println!("  brightness: {}%", device.brightness);
+    println!("  brightness method: {}", device.method);
+
+    if let Some(backlight) = &device.backlight {
+        println!("  backlight: {backlight}");
+    }
+    if let Some(i2c_bus) = &device.i2c_bus {
+        println!("  i2c bus: {i2c_bus}");
+    }
+    if let Some(path) = &device.device {
+        println!("  device: {}", path.display());
+    }
+    if let Some(connector) = &device.connector {
+        println!("  connector: {connector}");
+    }
+    if let Some(mapping_method) = &device.mapping_method {
+        println!("  mapping method: {mapping_method}");
+    }
 }
 
 fn print_json_devices(
@@ -127,6 +206,13 @@ fn resolve_device_name(name: &str) -> io::Result<String> {
 
 fn set_device_brightness(name: &str, percent: &str) -> Result<(), Box<dyn Error>> {
     let change = parse_brightness_change(percent)?;
+
+    match set_device_brightness_with_daemon(name, change) {
+        Ok(()) => return Ok(()),
+        Err(error) if daemon_unavailable(&error) => {}
+        Err(error) => return Err(error.into()),
+    }
+
     let devices = brightness_devices()?;
 
     if name == "@all" {
@@ -150,8 +236,39 @@ fn set_device_brightness(name: &str, percent: &str) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+fn set_device_brightness_with_daemon(name: &str, change: BrightnessChange) -> io::Result<()> {
+    if name == "@all" {
+        for device in waydim::daemon_list_devices()? {
+            let percent = waylevel::apply_percent_change(Some(device.brightness), change);
+            waydim::daemon_set_brightness(&device.name, percent)?;
+        }
+
+        return Ok(());
+    }
+
+    let name = resolve_device_name(name)?;
+    let current = match change {
+        BrightnessChange::Absolute(_) => None,
+        BrightnessChange::Delta(_)
+        | BrightnessChange::Multiply(_)
+        | BrightnessChange::Divide(_) => Some(waydim::daemon_get_brightness(&name)?),
+    };
+    let percent = waylevel::apply_percent_change(current, change);
+    waydim::daemon_set_brightness(&name, percent)
+}
+
 fn get_device_brightness(name: &str) -> Result<(), Box<dyn Error>> {
     let name = resolve_device_name(name)?;
+
+    match waydim::daemon_get_brightness(&name) {
+        Ok(brightness) => {
+            println!("{brightness}%");
+            return Ok(());
+        }
+        Err(error) if daemon_unavailable(&error) => {}
+        Err(error) => return Err(error.into()),
+    }
+
     let devices = brightness_devices()?;
     let Some(device) = devices.get(&name) else {
         return Err(io::Error::new(
@@ -166,8 +283,17 @@ fn get_device_brightness(name: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn daemon_unavailable(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+    )
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     match Cli::parse().command {
+        Command::Daemon => waydim::run_daemon()?,
+        Command::Refresh => waydim::daemon_refresh()?,
         Command::List { json } => list_devices(json)?,
         Command::Get { name } => get_device_brightness(&name)?,
         Command::Set { name, percent } => set_device_brightness(&name, &percent)?,

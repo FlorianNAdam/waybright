@@ -8,6 +8,7 @@
 }:
 let
   cfg = config.services.waybright;
+  waydim = cfg.waydim;
   waydark = cfg.waydark;
   system = pkgs.stdenv.hostPlatform.system;
 in
@@ -19,6 +20,25 @@ in
       type = lib.types.package;
       default = self.packages.${system}.waybright;
       description = "The waybright package to install.";
+    };
+
+    waydim = {
+      enable = lib.mkEnableOption "waydim hardware brightness daemon";
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = self.packages.${system}.waydim;
+        description = "The waydim package to use.";
+      };
+
+      socketPath = lib.mkOption {
+        type = lib.types.str;
+        default = "%t/waydim.sock";
+        description = ''
+          Socket path for the waydim daemon. The default expands to
+          $XDG_RUNTIME_DIR/waydim.sock in the user systemd manager.
+        '';
+      };
     };
 
     waydark = {
@@ -44,7 +64,37 @@ in
   config = lib.mkMerge [
     (lib.mkIf cfg.enable {
       environment.systemPackages = [ cfg.package ];
+      services.waybright.waydim.enable = lib.mkDefault true;
       services.waybright.waydark.enable = lib.mkDefault true;
+    })
+
+    (lib.mkIf waydim.enable {
+      systemd.user.sockets.waydim = {
+        description = "waydim daemon socket";
+        wantedBy = [ "sockets.target" ];
+
+        socketConfig = {
+          ListenStream = waydim.socketPath;
+          RemoveOnStop = true;
+        };
+      };
+
+      systemd.user.services.waydim = {
+        description = "waydim hardware brightness daemon";
+        wantedBy = [ "graphical-session.target" ];
+        requires = [ "waydim.socket" ];
+        after = [
+          "graphical-session.target"
+          "waydim.socket"
+        ];
+        partOf = [ "graphical-session.target" ];
+
+        serviceConfig = {
+          ExecStart = "${waydim.package}/bin/waydim daemon";
+          Environment = [ "WAYDIM_SOCKET=${waydim.socketPath}" ];
+          Restart = "on-failure";
+        };
+      };
     })
 
     (lib.mkIf waydark.enable {
