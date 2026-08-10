@@ -8,7 +8,7 @@ use waylevel::parse_percent_change;
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Command,
 }
 
 #[derive(Subcommand)]
@@ -169,10 +169,7 @@ fn get_device_brightness(name: &str) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    match Cli::parse()
-        .command
-        .unwrap_or(Command::List { json: false })
-    {
+    match Cli::parse().command {
         Command::List { json } => list_devices(json)?,
         Command::Get { name } => get_device_brightness(&name)?,
         Command::Set { name, percent } => set_device_brightness(&name, &percent)?,

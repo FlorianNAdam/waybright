@@ -1,18 +1,22 @@
 use std::{error::Error, io};
 
 use clap::{Parser, Subcommand};
+use serde_json::{Map, json};
 use waylevel::{PercentChange, apply_percent_change, parse_percent_change};
 
 #[derive(Parser)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    List,
     Daemon,
+    List {
+        #[arg(long)]
+        json: bool,
+    },
     Get {
         name: String,
     },
@@ -35,20 +39,27 @@ fn resolve_output_name(name: &str) -> io::Result<String> {
     Ok(name.to_owned())
 }
 
-fn list_outputs() -> Result<(), Box<dyn Error>> {
-    match waydark::daemon_list_outputs() {
-        Ok(outputs) => {
-            for output in outputs {
-                println!("{}", output.name);
-                println!("  brightness: {}%", output.brightness);
-                println!("  output: {}", output.label);
-            }
+fn list_outputs(json: bool) -> Result<(), Box<dyn Error>> {
+    let outputs = waydark::daemon_list_outputs()?;
+
+    if json {
+        let mut json_outputs = Map::new();
+        for output in outputs {
+            json_outputs.insert(
+                output.name.clone(),
+                json!({
+                    "brightness": output.brightness,
+                    "output": output.label,
+                }),
+            );
         }
-        Err(_) => {
-            for output in waydark::list_outputs()? {
-                println!("{}", output.name);
-                println!("  output: {}", output.label);
-            }
+
+        println!("{}", serde_json::to_string_pretty(&json_outputs)?);
+    } else {
+        for output in outputs {
+            println!("{}", output.name);
+            println!("  brightness: {}%", output.brightness);
+            println!("  output: {}", output.label);
         }
     }
 
@@ -81,9 +92,9 @@ fn set_brightness(name: &str, percent: &str) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    match Cli::parse().command.unwrap_or(Command::List) {
-        Command::List => list_outputs(),
+    match Cli::parse().command {
         Command::Daemon => waydark::run_daemon(),
+        Command::List { json } => list_outputs(json),
         Command::Get { name } => get_brightness(&name),
         Command::Set { name, percent } => set_brightness(&name, &percent),
     }

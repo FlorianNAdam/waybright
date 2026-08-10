@@ -489,10 +489,23 @@ name = "waydark"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "serde_json",
  "tempfile",
  "wayfocus",
  "wayland-client",
  "wayland-protocols-wlr",
+ "waylevel",
+]
+
+[[package]]
+name = "waydim"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde_json",
+ "waybright",
+ "waydark",
+ "wayfocus",
  "waylevel",
 ]
 
