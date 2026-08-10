@@ -1,8 +1,13 @@
 use std::{
+    env,
     error::Error,
-    fs::File,
-    io::{Seek, SeekFrom, Write},
+    fs::{self, File},
+    io::{self, Read, Seek, SeekFrom, Write},
     os::fd::AsFd,
+    os::unix::net::{UnixListener, UnixStream},
+    path::PathBuf,
+    thread,
+    time::Duration,
 };
 
 use tempfile::tempfile;
@@ -26,7 +31,45 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 
-pub fn run() -> Result<(), Box<dyn Error>> {
+#[derive(Debug)]
+pub struct Output {
+    pub name: String,
+    pub label: String,
+}
+
+#[derive(Debug)]
+pub struct OutputBrightness {
+    pub name: String,
+    pub brightness: u8,
+    pub label: String,
+}
+
+pub fn list_outputs() -> Result<Vec<Output>, Box<dyn Error>> {
+    let connection = Connection::connect_to_env()?;
+    let (globals, mut event_queue) = registry_queue_init::<State>(&connection)?;
+    let qh = event_queue.handle();
+    let shm = globals.bind::<WlShm, _, _>(&qh, 1..=1, ())?;
+
+    let outputs = bind_outputs(&globals, &qh);
+    let mut state = State {
+        outputs,
+        overlays: Vec::new(),
+        shm,
+    };
+    event_queue.roundtrip(&mut state)?;
+
+    Ok(state
+        .outputs
+        .iter()
+        .enumerate()
+        .map(|(index, output)| Output {
+            name: output.name(index),
+            label: output.label(index),
+        })
+        .collect())
+}
+
+pub fn run_daemon() -> Result<(), Box<dyn Error>> {
     let connection = Connection::connect_to_env()?;
     let (globals, mut event_queue) = registry_queue_init::<State>(&connection)?;
     let qh = event_queue.handle();
@@ -35,24 +78,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let shm = globals.bind::<WlShm, _, _>(&qh, 1..=1, ())?;
     let layer_shell = globals.bind::<ZwlrLayerShellV1, _, _>(&qh, 1..=4, ())?;
 
-    let outputs = globals
-        .contents()
-        .clone_list()
-        .into_iter()
-        .filter(|global| global.interface == "wl_output")
-        .map(|global| OutputInfo {
-            wl_output: globals
-                .registry()
-                .bind(global.name, global.version.min(4), &qh, ()),
-            name: None,
-            description: None,
-            make: None,
-            model: None,
-            mode: None,
-            scale: 1,
-        })
-        .collect();
-
+    let outputs = bind_outputs(&globals, &qh);
     let mut state = State {
         outputs,
         overlays: Vec::new(),
@@ -61,13 +87,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     event_queue.roundtrip(&mut state)?;
 
     if state.outputs.is_empty() {
-        println!("No Wayland outputs found");
-        return Ok(());
-    }
-
-    println!("Wayland outputs:");
-    for output in &state.outputs {
-        println!("- {}", output.label());
+        return Err(io::Error::new(io::ErrorKind::NotFound, "no Wayland outputs found").into());
     }
 
     for index in 0..state.outputs.len() {
@@ -98,18 +118,255 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             _layer_surface: layer_surface,
             buffer: None,
             file: None,
+            width: 0,
+            height: 0,
         });
     }
 
-    loop {
-        event_queue.blocking_dispatch(&mut state)?;
+    let socket_path = socket_path()?;
+    if socket_path.exists() {
+        fs::remove_file(&socket_path)?;
     }
+    let listener = UnixListener::bind(&socket_path)?;
+    listener.set_nonblocking(true)?;
+    println!("waydark daemon listening on {}", socket_path.display());
+
+    loop {
+        event_queue.dispatch_pending(&mut state)?;
+        if let Some(guard) = event_queue.prepare_read() {
+            match guard.read() {
+                Ok(_) => {}
+                Err(wayland_client::backend::WaylandError::Io(error))
+                    if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        event_queue.dispatch_pending(&mut state)?;
+
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => handle_client(stream, &mut state, &qh)?,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        event_queue.flush()?;
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+pub fn daemon_list_outputs() -> io::Result<Vec<OutputBrightness>> {
+    parse_output_brightness_response(&send_daemon_request("LIST")?)
+}
+
+pub fn daemon_get_brightness(name: &str) -> io::Result<u8> {
+    send_daemon_request(&format!("GET {name}"))?
+        .trim()
+        .parse()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+pub fn daemon_set_brightness(name: &str, brightness: u8) -> io::Result<()> {
+    let response = send_daemon_request(&format!("SET {name} {brightness}"))?;
+    if response.trim() == "OK" {
+        Ok(())
+    } else {
+        Err(io::Error::other(response.trim().to_owned()))
+    }
+}
+
+fn bind_outputs(
+    globals: &wayland_client::globals::GlobalList,
+    qh: &QueueHandle<State>,
+) -> Vec<OutputInfo> {
+    globals
+        .contents()
+        .clone_list()
+        .into_iter()
+        .filter(|global| global.interface == "wl_output")
+        .map(|global| OutputInfo {
+            wl_output: globals
+                .registry()
+                .bind(global.name, global.version.min(4), qh, ()),
+            name: None,
+            description: None,
+            make: None,
+            model: None,
+            mode: None,
+            scale: 1,
+            brightness: 100,
+        })
+        .collect()
+}
+
+fn handle_client(
+    mut stream: UnixStream,
+    state: &mut State,
+    qh: &QueueHandle<State>,
+) -> io::Result<()> {
+    let mut request = String::new();
+    stream.read_to_string(&mut request)?;
+    let response = handle_request(request.trim(), state, qh);
+    stream.write_all(response.as_bytes())?;
+    Ok(())
+}
+
+fn handle_request(request: &str, state: &mut State, qh: &QueueHandle<State>) -> String {
+    let mut parts = request.split_whitespace();
+    match parts.next() {
+        Some("LIST") => state
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(index, output)| {
+                format!(
+                    "{}\t{}\t{}\n",
+                    output.name(index),
+                    output.brightness,
+                    output.label(index)
+                )
+            })
+            .collect(),
+        Some("GET") => match parts.next() {
+            Some(name) => match state.output_index(name) {
+                Some(index) => format!("{}\n", state.outputs[index].brightness),
+                None => format!("ERR no output named {name}\n"),
+            },
+            None => "ERR missing output name\n".to_owned(),
+        },
+        Some("SET") => {
+            let Some(name) = parts.next() else {
+                return "ERR missing output name\n".to_owned();
+            };
+            let Some(brightness) = parts.next().and_then(|value| value.parse::<u8>().ok()) else {
+                return "ERR missing brightness\n".to_owned();
+            };
+            if brightness > 100 {
+                return "ERR brightness must be between 0 and 100\n".to_owned();
+            }
+
+            match state.set_brightness(name, brightness, qh) {
+                Ok(()) => "OK\n".to_owned(),
+                Err(error) => format!("ERR {error}\n"),
+            }
+        }
+        Some(command) => format!("ERR unknown command {command}\n"),
+        None => "ERR empty request\n".to_owned(),
+    }
+}
+
+fn send_daemon_request(request: &str) -> io::Result<String> {
+    let mut stream = UnixStream::connect(socket_path()?)?;
+    stream.write_all(request.as_bytes())?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+
+    if let Some(error) = response.trim().strip_prefix("ERR ") {
+        return Err(io::Error::other(error.to_owned()));
+    }
+
+    Ok(response)
+}
+
+fn parse_output_brightness_response(response: &str) -> io::Result<Vec<OutputBrightness>> {
+    response
+        .lines()
+        .map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let name = fields
+                .next()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing output name"))?;
+            let brightness = fields
+                .next()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing brightness"))?
+                .parse()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let label = fields.next().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "missing output label")
+            })?;
+
+            Ok(OutputBrightness {
+                name: name.to_owned(),
+                brightness,
+                label: label.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn socket_path() -> io::Result<PathBuf> {
+    let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is not set"))?;
+    Ok(runtime_dir.join("waydark.sock"))
 }
 
 struct State {
     outputs: Vec<OutputInfo>,
     overlays: Vec<Overlay>,
     shm: WlShm,
+}
+
+impl State {
+    fn output_index(&self, name: &str) -> Option<usize> {
+        self.outputs
+            .iter()
+            .enumerate()
+            .find(|(index, output)| output.name(*index) == name)
+            .map(|(index, _)| index)
+    }
+
+    fn set_brightness(
+        &mut self,
+        name: &str,
+        brightness: u8,
+        qh: &QueueHandle<State>,
+    ) -> io::Result<()> {
+        if name == "@all" {
+            for index in 0..self.outputs.len() {
+                self.set_brightness_by_index(index, brightness, qh)?;
+            }
+            return Ok(());
+        }
+
+        let Some(index) = self.output_index(name) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no output named {name}"),
+            ));
+        };
+
+        self.set_brightness_by_index(index, brightness, qh)
+    }
+
+    fn set_brightness_by_index(
+        &mut self,
+        index: usize,
+        brightness: u8,
+        qh: &QueueHandle<State>,
+    ) -> io::Result<()> {
+        self.outputs[index].brightness = brightness;
+        let overlay = &mut self.overlays[index];
+
+        if overlay.width > 0 && overlay.height > 0 {
+            let (buffer, file) = draw_dim_buffer(
+                &self.shm,
+                &overlay.surface,
+                qh,
+                overlay.width,
+                overlay.height,
+                brightness,
+            )
+            .map_err(|error| io::Error::other(error.to_string()))?;
+            overlay.buffer = Some(buffer);
+            overlay.file = Some(file);
+        }
+
+        Ok(())
+    }
 }
 
 struct OutputInfo {
@@ -120,11 +377,19 @@ struct OutputInfo {
     model: Option<String>,
     mode: Option<(i32, i32)>,
     scale: i32,
+    brightness: u8,
 }
 
 impl OutputInfo {
-    fn label(&self) -> String {
-        let name = self.name.as_deref().unwrap_or("unknown");
+    fn name(&self, index: usize) -> String {
+        self.name
+            .clone()
+            .or_else(|| self.model.clone())
+            .unwrap_or_else(|| format!("output-{index}"))
+    }
+
+    fn label(&self, index: usize) -> String {
+        let name = self.name(index);
         let description = self
             .description
             .as_deref()
@@ -146,6 +411,8 @@ struct Overlay {
     _layer_surface: ZwlrLayerSurfaceV1,
     buffer: Option<WlBuffer>,
     file: Option<File>,
+    width: u32,
+    height: u32,
 }
 
 struct LayerSurfaceData {
@@ -158,6 +425,7 @@ fn draw_dim_buffer(
     qh: &QueueHandle<State>,
     width: u32,
     height: u32,
+    brightness: u8,
 ) -> Result<(WlBuffer, File), Box<dyn Error>> {
     let stride = width.checked_mul(4).ok_or("buffer stride overflow")?;
     let size = stride.checked_mul(height).ok_or("buffer size overflow")?;
@@ -166,7 +434,8 @@ fn draw_dim_buffer(
     file.set_len(u64::from(size))?;
     file.seek(SeekFrom::Start(0))?;
 
-    let pixel = 0x80000000_u32.to_ne_bytes();
+    let alpha = 255 - ((u32::from(brightness) * 255 + 50) / 100);
+    let pixel = (alpha << 24).to_ne_bytes();
     let mut row = Vec::with_capacity(stride as usize);
     for _ in 0..width {
         row.extend_from_slice(&pixel);
@@ -364,11 +633,15 @@ impl Dispatch<ZwlrLayerSurfaceV1, LayerSurfaceData> for State {
                 }
 
                 let shm = state.shm.clone();
+                let brightness = state.outputs[data.output_index].brightness;
                 let Some(overlay) = state.overlays.get_mut(data.output_index) else {
                     return;
                 };
 
-                match draw_dim_buffer(&shm, &overlay.surface, qh, width, height) {
+                overlay.width = width;
+                overlay.height = height;
+
+                match draw_dim_buffer(&shm, &overlay.surface, qh, width, height, brightness) {
                     Ok((buffer, file)) => {
                         overlay.buffer = Some(buffer);
                         overlay.file = Some(file);

@@ -3,6 +3,7 @@ members = [
     "waydark",
     "waybright",
     "wayfocus",
+    "waylevel",
 ]
 resolver = "3"
 

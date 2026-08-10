@@ -3,6 +3,7 @@ use std::{error::Error, io};
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
 use waybright::{BrightnessChange, BrightnessControl, BrightnessDevice, brightness_devices};
+use waylevel::parse_percent_change;
 
 #[derive(Parser)]
 struct Cli {
@@ -27,71 +28,7 @@ enum Command {
 }
 
 fn parse_brightness_change(value: &str) -> io::Result<BrightnessChange> {
-    let Some(value) = value.strip_suffix('%') else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "brightness value must end with %",
-        ));
-    };
-
-    if let Some(delta) = value.strip_prefix('+') {
-        return parse_delta(delta).map(BrightnessChange::Delta);
-    }
-
-    if let Some(delta) = value.strip_prefix('-') {
-        return parse_delta(delta).map(|delta| BrightnessChange::Delta(-delta));
-    }
-
-    if let Some(factor) = value.strip_prefix('*') {
-        return parse_factor(factor).map(BrightnessChange::Multiply);
-    }
-
-    if let Some(factor) = value.strip_prefix('/') {
-        return parse_factor(factor).map(BrightnessChange::Divide);
-    }
-
-    let percent = value
-        .parse::<u8>()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-
-    if percent > 100 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "brightness percent must be between 0 and 100",
-        ));
-    }
-
-    Ok(BrightnessChange::Absolute(percent))
-}
-
-fn parse_delta(value: &str) -> io::Result<i8> {
-    let delta = value
-        .parse::<i8>()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-
-    if delta > 100 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "brightness delta must be between -100 and 100",
-        ));
-    }
-
-    Ok(delta)
-}
-
-fn parse_factor(value: &str) -> io::Result<u16> {
-    let factor = value
-        .parse::<u16>()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-
-    if factor == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "brightness factor must be greater than 0%",
-        ));
-    }
-
-    Ok(factor)
+    parse_percent_change(value)
 }
 
 fn list_devices(json: bool) -> Result<(), Box<dyn Error>> {
