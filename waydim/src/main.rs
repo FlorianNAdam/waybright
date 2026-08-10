@@ -1,14 +1,12 @@
-use std::{collections::BTreeMap, error::Error, io};
+use std::{error::Error, io};
 
 use clap::{Parser, Subcommand};
-use serde_json::{Map, json};
-use waybright::{BrightnessControl, BrightnessDevice, brightness_devices};
-use waylevel::{PercentChange, apply_percent_change, parse_percent_change};
+use serde_json::{Map, Value, json};
+use waydim::{BrightnessChange, BrightnessControl, BrightnessDevice, brightness_devices};
+use waylevel::parse_percent_change;
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(long, default_value_t = 50)]
-    hardware_min: u8,
     #[command(subcommand)]
     command: Command,
 }
@@ -29,28 +27,99 @@ enum Command {
     },
 }
 
-struct CombinedDevice {
-    name: String,
-    hardware: BrightnessDevice,
-    software: u8,
-}
-
-fn parse_brightness_change(value: &str) -> io::Result<PercentChange> {
+fn parse_brightness_change(value: &str) -> io::Result<BrightnessChange> {
     parse_percent_change(value)
 }
 
-fn validate_hardware_min(hardware_min: u8) -> io::Result<()> {
-    if hardware_min == 0 || hardware_min >= 100 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "hardware minimum must be between 1 and 99",
-        ));
+fn list_devices(json: bool) -> Result<(), Box<dyn Error>> {
+    let devices = brightness_devices()?;
+
+    if json {
+        print_json_devices(devices)?;
+    } else {
+        for (name, device) in devices {
+            println!("{name}");
+            print_brightness_device(&name, &device);
+        }
     }
 
     Ok(())
 }
 
-fn resolve_name(name: &str) -> io::Result<String> {
+fn print_json_devices(
+    devices: std::collections::BTreeMap<String, BrightnessDevice>,
+) -> Result<(), Box<dyn Error>> {
+    let mut json_devices = Map::new();
+
+    for (name, device) in devices {
+        json_devices.insert(name.clone(), json_brightness_device(&name, &device));
+    }
+
+    println!("{}", serde_json::to_string_pretty(&json_devices)?);
+    Ok(())
+}
+
+fn json_brightness_device(name: &str, device: &BrightnessDevice) -> Value {
+    let (brightness, brightness_error) = match device.get_brightness() {
+        Ok(brightness) => (Some(brightness), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+
+    match device {
+        BrightnessDevice::Backlight(mapping) => json!({
+            "brightness": brightness,
+            "brightness_error": brightness_error,
+            "method": "backlight",
+            "backlight": mapping.backlight,
+            "connector": mapping.connector,
+            "mapping_method": format!("{:?}", mapping.method).to_lowercase(),
+        }),
+        BrightnessDevice::DdcCi(mapping) => json!({
+            "brightness": brightness,
+            "brightness_error": brightness_error,
+            "method": "ddc/ci",
+            "i2c_bus": mapping.i2c_bus,
+            "device": mapping.device,
+            "connector": mapping.connector,
+            "output": mapping.output.as_deref().unwrap_or(name),
+        }),
+    }
+}
+
+fn print_brightness_device(name: &str, device: &BrightnessDevice) {
+    let brightness = device.get_brightness();
+    let brightness = brightness
+        .as_ref()
+        .map(|brightness| format!("{brightness}%"))
+        .unwrap_or_else(|error| format!("unknown ({error})"));
+
+    println!("  brightness: {brightness}");
+
+    match device {
+        BrightnessDevice::Backlight(mapping) => {
+            println!("  brightness method: backlight");
+            println!("  backlight: {}", mapping.backlight);
+            println!("  connector: {}", mapping.connector);
+            println!("  mapping method: {:?}", mapping.method);
+        }
+        BrightnessDevice::DdcCi(mapping) => match &mapping.connector {
+            Some(connector) => {
+                println!("  brightness method: ddc/ci");
+                println!("  i2c bus: {}", mapping.i2c_bus);
+                println!("  device: {}", mapping.device.display());
+                println!("  connector: {connector}");
+            }
+            None => {
+                println!("  brightness method: ddc/ci");
+                println!("  i2c bus: {}", mapping.i2c_bus);
+                println!("  device: {}", mapping.device.display());
+                println!("  output: {name}");
+            }
+        },
+    }
+}
+
+fn resolve_device_name(name: &str) -> io::Result<String> {
     if name == "@focused" {
         return wayfocus::focused_output();
     }
@@ -58,167 +127,53 @@ fn resolve_name(name: &str) -> io::Result<String> {
     Ok(name.to_owned())
 }
 
-fn combined_devices() -> Result<BTreeMap<String, CombinedDevice>, Box<dyn Error>> {
-    let hardware_devices = brightness_devices()?;
-    let software_outputs = waydark::daemon_list_outputs()?
-        .into_iter()
-        .map(|output| (output.name, output.brightness))
-        .collect::<BTreeMap<_, _>>();
-
-    let mut devices = BTreeMap::new();
-    for (name, hardware) in hardware_devices {
-        let Some(software) = software_outputs.get(&name).copied() else {
-            continue;
-        };
-
-        devices.insert(
-            name.clone(),
-            CombinedDevice {
-                name,
-                hardware,
-                software,
-            },
-        );
-    }
-
-    Ok(devices)
-}
-
-fn effective_brightness(hardware: u32, software: u8, hardware_min: u8) -> u8 {
-    let hardware_min = u32::from(hardware_min);
-
-    if software < 100 {
-        return ((u32::from(software) * hardware_min + 50) / 100).clamp(0, 100) as u8;
-    }
-
-    (hardware_min + (hardware.clamp(0, 100) * (100 - hardware_min) + 50) / 100).clamp(0, 100) as u8
-}
-
-fn split_brightness(percent: u8, hardware_min: u8) -> (u8, u8) {
-    if percent >= hardware_min {
-        let hardware = ((u32::from(percent - hardware_min) * 100
-            + u32::from(100 - hardware_min) / 2)
-            / u32::from(100 - hardware_min))
-        .clamp(0, 100) as u8;
-
-        return (hardware, 100);
-    }
-
-    let software = ((u32::from(percent) * 100 + u32::from(hardware_min) / 2)
-        / u32::from(hardware_min))
-    .clamp(0, 100) as u8;
-
-    (0, software)
-}
-
-fn list_devices(hardware_min: u8, json: bool) -> Result<(), Box<dyn Error>> {
-    let devices = combined_devices()?;
-
-    if json {
-        let mut json_devices = Map::new();
-        for device in devices.values() {
-            let hardware = device.hardware.get_brightness()?;
-            let effective = effective_brightness(hardware, device.software, hardware_min);
-
-            json_devices.insert(
-                device.name.clone(),
-                json!({
-                    "brightness": effective,
-                    "hardware": hardware,
-                    "software": device.software,
-                }),
-            );
-        }
-
-        println!("{}", serde_json::to_string_pretty(&json_devices)?);
-    } else {
-        for device in devices.values() {
-            let hardware = device.hardware.get_brightness()?;
-            let effective = effective_brightness(hardware, device.software, hardware_min);
-
-            println!("{}", device.name);
-            println!("  brightness: {effective}%");
-            println!("  hardware: {hardware}%");
-            println!("  software: {}%", device.software);
-        }
-    }
-
-    Ok(())
-}
-
-fn get_brightness(name: &str, hardware_min: u8) -> Result<(), Box<dyn Error>> {
-    let name = resolve_name(name)?;
-    let devices = combined_devices()?;
-    let Some(device) = devices.get(&name) else {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no combined brightness device named {name}"),
-        )
-        .into());
-    };
-
-    println!(
-        "{}%",
-        effective_brightness(
-            device.hardware.get_brightness()?,
-            device.software,
-            hardware_min
-        )
-    );
-    Ok(())
-}
-
-fn set_one(device: &CombinedDevice, percent: u8, hardware_min: u8) -> Result<(), Box<dyn Error>> {
-    let (hardware, software) = split_brightness(percent, hardware_min);
-    device.hardware.set_brightness(hardware)?;
-    waydark::daemon_set_brightness(&device.name, software)?;
-    Ok(())
-}
-
-fn set_brightness(name: &str, percent: &str, hardware_min: u8) -> Result<(), Box<dyn Error>> {
+fn set_device_brightness(name: &str, percent: &str) -> Result<(), Box<dyn Error>> {
     let change = parse_brightness_change(percent)?;
-    let devices = combined_devices()?;
+    let devices = brightness_devices()?;
 
     if name == "@all" {
         for device in devices.values() {
-            let current = effective_brightness(
-                device.hardware.get_brightness()?,
-                device.software,
-                hardware_min,
-            );
-            let percent = apply_percent_change(Some(u32::from(current)), change);
-            set_one(device, percent, hardware_min)?;
+            device.apply_brightness_change(change)?;
         }
 
         return Ok(());
     }
 
-    let name = resolve_name(name)?;
+    let name = resolve_device_name(name)?;
     let Some(device) = devices.get(&name) else {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("no combined brightness device named {name}"),
+            format!("no brightness device named {name}"),
         )
         .into());
     };
 
-    let current = effective_brightness(
-        device.hardware.get_brightness()?,
-        device.software,
-        hardware_min,
-    );
-    let percent = apply_percent_change(Some(u32::from(current)), change);
-    set_one(device, percent, hardware_min)?;
+    device.apply_brightness_change(change)?;
+    Ok(())
+}
+
+fn get_device_brightness(name: &str) -> Result<(), Box<dyn Error>> {
+    let name = resolve_device_name(name)?;
+    let devices = brightness_devices()?;
+    let Some(device) = devices.get(&name) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no brightness device named {name}"),
+        )
+        .into());
+    };
+
+    let brightness = device.get_brightness()?;
+    println!("{brightness}%");
     Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let cli = Cli::parse();
-    validate_hardware_min(cli.hardware_min)?;
-
-    match cli.command {
-        Command::List { json } => list_devices(cli.hardware_min, json),
-        Command::Get { name } => get_brightness(&name, cli.hardware_min),
-        Command::Set { name, percent } => set_brightness(&name, &percent, cli.hardware_min),
+    match Cli::parse().command {
+        Command::List { json } => list_devices(json)?,
+        Command::Get { name } => get_device_brightness(&name)?,
+        Command::Set { name, percent } => set_device_brightness(&name, &percent)?,
     }
+
+    Ok(())
 }

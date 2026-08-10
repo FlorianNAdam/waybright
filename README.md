@@ -2,9 +2,9 @@
 
 Wayland brightness and dimming tools.
 
-- `waybright`: physical brightness control through backlight and DDC/CI
+- `waybright`: virtual brightness control combining `waydim` and `waydark`
 - `waydark`: software dimming through Wayland overlay surfaces
-- `waydim`: virtual brightness control combining `waybright` and `waydark`
+- `waydim`: physical brightness control through backlight and DDC/CI
 - `wayfocus`: focused-output detection for supported compositors
 
 License: MIT

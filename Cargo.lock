@@ -476,10 +476,9 @@ name = "waybright"
 version = "0.1.0"
 dependencies = [
  "clap",
- "dbus",
- "ddc",
- "ddc-i2c",
  "serde_json",
+ "waydark",
+ "waydim",
  "wayfocus",
  "waylevel",
 ]
@@ -502,9 +501,10 @@ name = "waydim"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "dbus",
+ "ddc",
+ "ddc-i2c",
  "serde_json",
- "waybright",
- "waydark",
  "wayfocus",
  "waylevel",
 ]

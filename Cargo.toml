@@ -1,8 +1,8 @@
 [workspace]
 members = [
     "waydark",
-    "waydim",
     "waybright",
+    "waydim",
     "wayfocus",
     "waylevel",
 ]
