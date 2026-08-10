@@ -79,6 +79,7 @@
               cargo
               rustc
               rustfmt
+              wayland
               libxkbcommon
               eudev
               dbus

@@ -15,5 +15,6 @@ naersk-lib.buildPackage {
   ];
   buildInputs = with pkgs; [
     dbus
+    wayland
   ];
 }
