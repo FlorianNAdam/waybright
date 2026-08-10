@@ -24,8 +24,8 @@
 
       flake = {
         nixosModules = rec {
-          waydark = import ./nix/module.nix { inherit self; };
-          default = waydark;
+          waybright = import ./nix/module.nix { inherit self; };
+          default = waybright;
         };
       };
 

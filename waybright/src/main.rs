@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, error::Error, io};
+use std::{collections::BTreeMap, error::Error, io, thread};
 
 use clap::{Parser, Subcommand};
 use serde_json::{Map, json};
@@ -296,12 +296,7 @@ fn set_brightness(name: &str, percent: &str, hardware_min: u8) -> Result<(), Box
     let devices = combined_devices()?;
 
     if name == "@all" {
-        for device in devices.values() {
-            let current = device_brightness(device, hardware_min)?;
-            let percent = apply_percent_change(Some(u32::from(current)), change);
-            set_one(device, percent, hardware_min)?;
-        }
-
+        set_all_brightness(&devices, change, hardware_min)?;
         return Ok(());
     }
 
@@ -317,6 +312,62 @@ fn set_brightness(name: &str, percent: &str, hardware_min: u8) -> Result<(), Box
     let current = device_brightness(device, hardware_min)?;
     let percent = apply_percent_change(Some(u32::from(current)), change);
     set_one(device, percent, hardware_min)?;
+    Ok(())
+}
+
+fn set_all_brightness(
+    devices: &BTreeMap<String, CombinedDevice>,
+    change: PercentChange,
+    hardware_min: u8,
+) -> Result<(), Box<dyn Error>> {
+    let mut daemon_targets = Vec::new();
+    let mut software_targets = Vec::new();
+    let mut direct_targets = Vec::new();
+
+    for device in devices.values() {
+        let current = device_brightness(device, hardware_min)?;
+        let percent = apply_percent_change(Some(u32::from(current)), change);
+
+        match (&device.hardware, device.software) {
+            (Some(HardwareDevice::Daemon), Some(_)) => {
+                let (hardware, software) = split_brightness(percent, hardware_min);
+                daemon_targets.push((device.name.clone(), hardware));
+                software_targets.push((device.name.clone(), software));
+            }
+            (Some(HardwareDevice::Daemon), None) => {
+                daemon_targets.push((device.name.clone(), percent));
+            }
+            _ => direct_targets.push((device, percent)),
+        }
+    }
+
+    thread::scope(|scope| {
+        let mut handles = Vec::new();
+
+        if !daemon_targets.is_empty() {
+            handles.push(scope.spawn(|| waydim::daemon_set_all_brightness(&daemon_targets)));
+        }
+
+        for (name, percent) in &software_targets {
+            handles.push(scope.spawn(move || waydark::daemon_set_brightness(name, *percent)));
+        }
+
+        for (device, percent) in direct_targets {
+            handles.push(scope.spawn(move || {
+                set_one(device, percent, hardware_min)
+                    .map_err(|error| io::Error::other(error.to_string()))
+            }));
+        }
+
+        for handle in handles {
+            handle
+                .join()
+                .unwrap_or_else(|_| Err(io::Error::other("brightness worker panicked")))?;
+        }
+
+        Ok::<(), io::Error>(())
+    })?;
+
     Ok(())
 }
 

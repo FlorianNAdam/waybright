@@ -1,4 +1,4 @@
-use std::{error::Error, io};
+use std::{error::Error, io, thread};
 
 use clap::{Parser, Subcommand};
 use serde_json::{Map, Value, json};
@@ -216,9 +216,19 @@ fn set_device_brightness(name: &str, percent: &str) -> Result<(), Box<dyn Error>
     let devices = brightness_devices()?;
 
     if name == "@all" {
-        for device in devices.values() {
-            device.apply_brightness_change(change)?;
-        }
+        thread::scope(|scope| {
+            devices
+                .values()
+                .map(|device| scope.spawn(move || device.apply_brightness_change(change)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err(io::Error::other("brightness worker panicked")))
+                })
+                .collect::<io::Result<Vec<_>>>()
+        })?;
 
         return Ok(());
     }
@@ -238,10 +248,13 @@ fn set_device_brightness(name: &str, percent: &str) -> Result<(), Box<dyn Error>
 
 fn set_device_brightness_with_daemon(name: &str, change: BrightnessChange) -> io::Result<()> {
     if name == "@all" {
+        let mut targets = Vec::new();
         for device in waydim::daemon_list_devices()? {
             let percent = waylevel::apply_percent_change(Some(device.brightness), change);
-            waydim::daemon_set_brightness(&device.name, percent)?;
+            targets.push((device.name, percent));
         }
+
+        waydim::daemon_set_all_brightness(&targets)?;
 
         return Ok(());
     }

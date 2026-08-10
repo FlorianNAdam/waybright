@@ -5,7 +5,7 @@ use std::{
     os::fd::FromRawFd,
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
-    process,
+    process, thread,
 };
 
 pub mod backlight;
@@ -150,6 +150,23 @@ pub fn daemon_set_brightness(name: &str, brightness: u8) -> io::Result<()> {
     }
 }
 
+pub fn daemon_set_all_brightness(targets: &[(String, u8)]) -> io::Result<()> {
+    let mut request = String::from("SET_ALL");
+    for (name, brightness) in targets {
+        request.push(' ');
+        request.push_str(name);
+        request.push(' ');
+        request.push_str(&brightness.to_string());
+    }
+
+    let response = send_daemon_request(&request)?;
+    if response.trim() == "OK" {
+        Ok(())
+    } else {
+        Err(io::Error::other(response.trim().to_owned()))
+    }
+}
+
 pub fn daemon_refresh() -> io::Result<()> {
     let response = send_daemon_request("REFRESH")?;
     if response.trim() == "OK" {
@@ -215,6 +232,41 @@ impl DaemonState {
         self.brightness.insert(name.to_owned(), u32::from(percent));
         Ok(())
     }
+
+    fn set_all_brightness(&mut self, targets: Vec<(String, u8)>) -> io::Result<()> {
+        for (name, _) in &targets {
+            if !self.devices.contains_key(name) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no brightness device named {name}"),
+                ));
+            }
+        }
+
+        let results = thread::scope(|scope| {
+            targets
+                .iter()
+                .map(|(name, percent)| {
+                    let device = &self.devices[name];
+                    scope.spawn(move || device.set_brightness(*percent))
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err(io::Error::other("brightness worker panicked")))
+                })
+                .collect::<Vec<_>>()
+        });
+
+        for ((name, percent), result) in targets.into_iter().zip(results) {
+            result?;
+            self.brightness.insert(name, u32::from(percent));
+        }
+
+        Ok(())
+    }
 }
 
 fn daemon_device(name: &str, device: &BrightnessDevice, brightness: u32) -> DaemonBrightnessDevice {
@@ -277,6 +329,27 @@ fn handle_request(request: &str, state: &mut DaemonState) -> String {
             }
 
             match state.set_brightness(name, brightness) {
+                Ok(()) => "OK\n".to_owned(),
+                Err(error) => format!("ERR {error}\n"),
+            }
+        }
+        Some("SET_ALL") => {
+            let mut targets = Vec::new();
+            loop {
+                let Some(name) = parts.next() else {
+                    break;
+                };
+                let Some(brightness) = parts.next().and_then(|value| value.parse::<u8>().ok())
+                else {
+                    return "ERR missing brightness\n".to_owned();
+                };
+                if brightness > 100 {
+                    return "ERR brightness must be between 0 and 100\n".to_owned();
+                }
+                targets.push((name.to_owned(), brightness));
+            }
+
+            match state.set_all_brightness(targets) {
                 Ok(()) => "OK\n".to_owned(),
                 Err(error) => format!("ERR {error}\n"),
             }
