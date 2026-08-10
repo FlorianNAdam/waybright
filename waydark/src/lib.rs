@@ -3,10 +3,10 @@ use std::{
     error::Error,
     fs::{self, File},
     io::{self, Read, Seek, SeekFrom, Write},
-    os::fd::AsFd,
+    os::fd::{AsFd, FromRawFd},
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
-    thread,
+    process, thread,
     time::Duration,
 };
 
@@ -123,11 +123,7 @@ pub fn run_daemon() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    let socket_path = socket_path()?;
-    if socket_path.exists() {
-        fs::remove_file(&socket_path)?;
-    }
-    let listener = UnixListener::bind(&socket_path)?;
+    let (listener, socket_path) = daemon_listener()?;
     listener.set_nonblocking(true)?;
     println!("waydark daemon listening on {}", socket_path.display());
 
@@ -298,10 +294,48 @@ fn parse_output_brightness_response(response: &str) -> io::Result<Vec<OutputBrig
 }
 
 fn socket_path() -> io::Result<PathBuf> {
+    if let Some(socket_path) = env::var_os("WAYDARK_SOCKET") {
+        return Ok(PathBuf::from(socket_path));
+    }
+
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR is not set"))?;
     Ok(runtime_dir.join("waydark.sock"))
+}
+
+fn daemon_listener() -> io::Result<(UnixListener, PathBuf)> {
+    let socket_path = socket_path()?;
+
+    if systemd_listen_fds()? == 1 {
+        // SAFETY: systemd socket activation passes the first inherited listener at fd 3.
+        let listener = unsafe { UnixListener::from_raw_fd(3) };
+        return Ok((listener, socket_path));
+    }
+
+    if socket_path.exists() {
+        fs::remove_file(&socket_path)?;
+    }
+
+    UnixListener::bind(&socket_path).map(|listener| (listener, socket_path))
+}
+
+fn systemd_listen_fds() -> io::Result<u32> {
+    let Some(listen_pid) = env::var_os("LISTEN_PID") else {
+        return Ok(0);
+    };
+    if listen_pid.to_string_lossy().parse::<u32>().ok() != Some(process::id()) {
+        return Ok(0);
+    }
+
+    let Some(listen_fds) = env::var_os("LISTEN_FDS") else {
+        return Ok(0);
+    };
+
+    listen_fds
+        .to_string_lossy()
+        .parse()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
 }
 
 struct State {

@@ -9,6 +9,7 @@
 
   outputs =
     inputs@{
+      self,
       flake-parts,
       nixpkgs,
       naersk,
@@ -21,6 +22,13 @@
 
       systems = nixpkgs.lib.systems.flakeExposed;
 
+      flake = {
+        nixosModules = rec {
+          waydark = import ./nix/module.nix { inherit self; };
+          default = waydark;
+        };
+      };
+
       perSystem =
         { config, pkgs, ... }:
         let
@@ -30,7 +38,8 @@
             "waydim"
             "wayfocus"
           ];
-          workspacePackage = import ./default.nix { inherit pkgs naersk; };
+          naersk-lib = pkgs.callPackage naersk { };
+          workspacePackage = pkgs.callPackage ./nix/package.nix { inherit naersk-lib; };
           binaryPackage =
             packageName:
             pkgs.runCommand "${packageName}-${workspacePackage.version}" { } ''
