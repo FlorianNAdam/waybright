@@ -14,6 +14,7 @@ pub struct DdcCiMapping {
     pub device: PathBuf,
     pub connector: Option<String>,
     pub output: Option<String>,
+    brightness: Option<BrightnessValue>,
 }
 
 #[derive(Debug)]
@@ -21,10 +22,15 @@ struct DdcCiDevice {
     i2c_bus: String,
     device: PathBuf,
     edid: Option<Vec<u8>>,
+    brightness: BrightnessValue,
 }
 
 impl BrightnessControl for DdcCiMapping {
     fn get_brightness(&self) -> io::Result<u32> {
+        if let Some(brightness) = &self.brightness {
+            return Ok(brightness.percent());
+        }
+
         read_ddcci_brightness(&self.device).map(|brightness| brightness.percent())
     }
 
@@ -71,6 +77,7 @@ fn map_ddcci_to_outputs_from(
                 device: device.device,
                 connector,
                 output,
+                brightness: Some(device.brightness),
             }
         })
         .collect())
@@ -94,7 +101,7 @@ fn discover_ddcci_devices_from(
             continue;
         };
 
-        if ddc.get_vcp_feature(0x10).is_err() {
+        let Ok(brightness) = read_ddcci_brightness_from(&mut ddc) else {
             continue;
         };
 
@@ -102,6 +109,7 @@ fn discover_ddcci_devices_from(
             i2c_bus,
             device,
             edid: read_ddc_edid(&mut ddc).ok(),
+            brightness,
         });
     }
 
@@ -122,6 +130,10 @@ fn read_ddc_edid(ddc: &mut ddc_i2c::I2cDeviceDdc) -> io::Result<Vec<u8>> {
 
 fn read_ddcci_brightness(path: &Path) -> io::Result<BrightnessValue> {
     let mut ddc = ddc_i2c::from_i2c_device(path)?;
+    read_ddcci_brightness_from(&mut ddc)
+}
+
+fn read_ddcci_brightness_from(ddc: &mut ddc_i2c::I2cDeviceDdc) -> io::Result<BrightnessValue> {
     let value = ddc.get_vcp_feature(0x10).map_err(io::Error::other)?;
 
     Ok(BrightnessValue {
