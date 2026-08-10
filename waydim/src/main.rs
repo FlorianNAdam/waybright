@@ -39,7 +39,7 @@ fn list_devices(json: bool) -> Result<(), Box<dyn Error>> {
     } else {
         for (name, device) in devices {
             println!("{name}");
-            print_brightness_device(&name, &device);
+            print_brightness_device(&device);
         }
     }
 
@@ -52,14 +52,14 @@ fn print_json_devices(
     let mut json_devices = Map::new();
 
     for (name, device) in devices {
-        json_devices.insert(name.clone(), json_brightness_device(&name, &device));
+        json_devices.insert(name.clone(), json_brightness_device(&device));
     }
 
     println!("{}", serde_json::to_string_pretty(&json_devices)?);
     Ok(())
 }
 
-fn json_brightness_device(name: &str, device: &BrightnessDevice) -> Value {
+fn json_brightness_device(device: &BrightnessDevice) -> Value {
     let (brightness, brightness_error) = match device.get_brightness() {
         Ok(brightness) => (Some(brightness), None),
         Err(error) => (None, Some(error.to_string())),
@@ -81,12 +81,11 @@ fn json_brightness_device(name: &str, device: &BrightnessDevice) -> Value {
             "i2c_bus": mapping.i2c_bus,
             "device": mapping.device,
             "connector": mapping.connector,
-            "output": mapping.output.as_deref().unwrap_or(name),
         }),
     }
 }
 
-fn print_brightness_device(name: &str, device: &BrightnessDevice) {
+fn print_brightness_device(device: &BrightnessDevice) {
     let brightness = device.get_brightness();
     let brightness = brightness
         .as_ref()
@@ -113,7 +112,6 @@ fn print_brightness_device(name: &str, device: &BrightnessDevice) {
                 println!("  brightness method: ddc/ci");
                 println!("  i2c bus: {}", mapping.i2c_bus);
                 println!("  device: {}", mapping.device.display());
-                println!("  output: {name}");
             }
         },
     }

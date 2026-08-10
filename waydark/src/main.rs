@@ -49,7 +49,9 @@ fn list_outputs(json: bool) -> Result<(), Box<dyn Error>> {
                 output.name.clone(),
                 json!({
                     "brightness": output.brightness,
-                    "output": output.label,
+                    "output": output.description,
+                    "mode": output.mode.map(|(width, height)| format!("{width}x{height}")),
+                    "scale": output.scale,
                 }),
             );
         }
@@ -59,7 +61,11 @@ fn list_outputs(json: bool) -> Result<(), Box<dyn Error>> {
         for output in outputs {
             println!("{}", output.name);
             println!("  brightness: {}%", output.brightness);
-            println!("  output: {}", output.label);
+            println!("  output: {}", output.description);
+            if let Some((width, height)) = output.mode {
+                println!("  mode: {width}x{height}");
+            }
+            println!("  scale: {}", output.scale);
         }
     }
 

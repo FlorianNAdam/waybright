@@ -41,7 +41,9 @@ pub struct Output {
 pub struct OutputBrightness {
     pub name: String,
     pub brightness: u8,
-    pub label: String,
+    pub description: String,
+    pub mode: Option<(i32, i32)>,
+    pub scale: i32,
 }
 
 pub fn list_outputs() -> Result<Vec<Output>, Box<dyn Error>> {
@@ -216,11 +218,17 @@ fn handle_request(request: &str, state: &mut State, qh: &QueueHandle<State>) -> 
             .iter()
             .enumerate()
             .map(|(index, output)| {
+                let mode = output
+                    .mode
+                    .map(|(width, height)| format!("{width}x{height}"))
+                    .unwrap_or_default();
                 format!(
-                    "{}\t{}\t{}\n",
+                    "{}\t{}\t{}\t{}\t{}\n",
                     output.name(index),
                     output.brightness,
-                    output.label(index)
+                    output.description(index),
+                    mode,
+                    output.scale
                 )
             })
             .collect(),
@@ -271,7 +279,7 @@ fn parse_output_brightness_response(response: &str) -> io::Result<Vec<OutputBrig
     response
         .lines()
         .map(|line| {
-            let mut fields = line.splitn(3, '\t');
+            let mut fields = line.split('\t');
             let name = fields
                 .next()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing output name"))?;
@@ -280,17 +288,50 @@ fn parse_output_brightness_response(response: &str) -> io::Result<Vec<OutputBrig
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing brightness"))?
                 .parse()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            let label = fields.next().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "missing output label")
+            let description = fields.next().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "missing output description")
             })?;
+            let mode = fields
+                .next()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing output mode"))?;
+            let mode = parse_mode(mode)?;
+            let scale = fields
+                .next()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing output scale"))?
+                .parse()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
 
             Ok(OutputBrightness {
                 name: name.to_owned(),
                 brightness,
-                label: label.to_owned(),
+                description: description.to_owned(),
+                mode,
+                scale,
             })
         })
         .collect()
+}
+
+fn parse_mode(value: &str) -> io::Result<Option<(i32, i32)>> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    let Some((width, height)) = value.split_once('x') else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid output mode",
+        ));
+    };
+
+    Ok(Some((
+        width
+            .parse()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+        height
+            .parse()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+    )))
 }
 
 fn socket_path() -> io::Result<PathBuf> {
@@ -424,11 +465,7 @@ impl OutputInfo {
 
     fn label(&self, index: usize) -> String {
         let name = self.name(index);
-        let description = self
-            .description
-            .as_deref()
-            .or(self.model.as_deref())
-            .unwrap_or("unknown output");
+        let description = self.description(index);
 
         match self.mode {
             Some((width, height)) => format!(
@@ -437,6 +474,22 @@ impl OutputInfo {
             ),
             None => format!("{name}: {description} (scale {})", self.scale),
         }
+    }
+
+    fn description(&self, index: usize) -> String {
+        let name = self.name(index);
+        let description = self
+            .description
+            .as_deref()
+            .or(self.model.as_deref())
+            .unwrap_or("unknown output");
+        let description = description
+            .strip_prefix(&format!("{name}: "))
+            .unwrap_or(description);
+        description
+            .strip_suffix(&format!(" ({name})"))
+            .unwrap_or(description)
+            .to_owned()
     }
 }
 
