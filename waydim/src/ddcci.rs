@@ -14,7 +14,7 @@ pub struct DdcCiMapping {
     pub device: PathBuf,
     pub connector: Option<String>,
     pub output: Option<String>,
-    brightness: Option<BrightnessValue>,
+    brightness: BrightnessValue,
 }
 
 #[derive(Debug)]
@@ -27,15 +27,11 @@ struct DdcCiDevice {
 
 impl BrightnessControl for DdcCiMapping {
     fn get_brightness(&self) -> io::Result<u32> {
-        if let Some(brightness) = &self.brightness {
-            return Ok(brightness.percent());
-        }
-
-        read_ddcci_brightness(&self.device).map(|brightness| brightness.percent())
+        Ok(self.brightness.percent())
     }
 
     fn set_brightness(&self, percent: u8) -> io::Result<()> {
-        set_ddcci_brightness_percent(&self.device, percent)
+        set_ddcci_brightness_percent(&self.device, percent, self.brightness.max)
     }
 }
 
@@ -77,7 +73,7 @@ fn map_ddcci_to_outputs_from(
                 device: device.device,
                 connector,
                 output,
-                brightness: Some(device.brightness),
+                brightness: device.brightness,
             }
         })
         .collect())
@@ -128,11 +124,6 @@ fn read_ddc_edid(ddc: &mut ddc_i2c::I2cDeviceDdc) -> io::Result<Vec<u8>> {
     Ok(edid)
 }
 
-fn read_ddcci_brightness(path: &Path) -> io::Result<BrightnessValue> {
-    let mut ddc = ddc_i2c::from_i2c_device(path)?;
-    read_ddcci_brightness_from(&mut ddc)
-}
-
 fn read_ddcci_brightness_from(ddc: &mut ddc_i2c::I2cDeviceDdc) -> io::Result<BrightnessValue> {
     let value = ddc.get_vcp_feature(0x10).map_err(io::Error::other)?;
 
@@ -142,13 +133,8 @@ fn read_ddcci_brightness_from(ddc: &mut ddc_i2c::I2cDeviceDdc) -> io::Result<Bri
     })
 }
 
-fn set_ddcci_brightness_percent(path: &Path, percent: u8) -> io::Result<()> {
+fn set_ddcci_brightness_percent(path: &Path, percent: u8, max: u32) -> io::Result<()> {
     let mut ddc = ddc_i2c::from_i2c_device(path)?;
-    let max = u32::from(
-        ddc.get_vcp_feature(0x10)
-            .map_err(io::Error::other)?
-            .maximum(),
-    );
     let value = percent_to_value(percent, max);
     ddc.set_vcp_feature(0x10, value as u16)
         .map_err(io::Error::other)
