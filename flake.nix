@@ -34,9 +34,6 @@
         let
           packageNames = [
             "waybright"
-            "waydark"
-            "waydim"
-            "wayfocus"
           ];
           naersk-lib = pkgs.callPackage naersk { };
           workspacePackage = pkgs.callPackage ./nix/package.nix { inherit naersk-lib; };

@@ -8,122 +8,52 @@
 }:
 let
   cfg = config.services.waybright;
-  waydim = cfg.waydim;
-  waydark = cfg.waydark;
   system = pkgs.stdenv.hostPlatform.system;
 in
 {
   options.services.waybright = {
-    enable = lib.mkEnableOption "waybright brightness tools";
+    enable = lib.mkEnableOption "waybright brightness daemon";
 
     package = lib.mkOption {
       type = lib.types.package;
       default = self.packages.${system}.waybright;
-      description = "The waybright package to install.";
+      description = "The waybright package to use.";
     };
 
-    waydim = {
-      enable = lib.mkEnableOption "waydim hardware brightness daemon";
-
-      package = lib.mkOption {
-        type = lib.types.package;
-        default = self.packages.${system}.waydim;
-        description = "The waydim package to use.";
-      };
-
-      socketPath = lib.mkOption {
-        type = lib.types.str;
-        default = "%t/waydim.sock";
-        description = ''
-          Socket path for the waydim daemon. The default expands to
-          $XDG_RUNTIME_DIR/waydim.sock in the user systemd manager.
-        '';
-      };
-    };
-
-    waydark = {
-      enable = lib.mkEnableOption "waydark software dimming daemon";
-
-      package = lib.mkOption {
-        type = lib.types.package;
-        default = self.packages.${system}.waydark;
-        description = "The waydark package to use.";
-      };
-
-      socketPath = lib.mkOption {
-        type = lib.types.str;
-        default = "%t/waydark.sock";
-        description = ''
-          Socket path for the waydark daemon. The default expands to
-          $XDG_RUNTIME_DIR/waydark.sock in the user systemd manager.
-        '';
-      };
+    hardwareMin = lib.mkOption {
+      type = lib.types.ints.between 1 99;
+      default = 50;
+      description = "Virtual brightness level where hardware dimming begins.";
     };
   };
 
-  config = lib.mkMerge [
-    (lib.mkIf cfg.enable {
-      environment.systemPackages = [ cfg.package ];
-      services.waybright.waydim.enable = lib.mkDefault true;
-      services.waybright.waydark.enable = lib.mkDefault true;
-    })
+  config = lib.mkIf cfg.enable {
+    environment.systemPackages = [ cfg.package ];
 
-    (lib.mkIf waydim.enable {
-      systemd.user.sockets.waydim = {
-        description = "waydim daemon socket";
-        wantedBy = [ "sockets.target" ];
-
-        socketConfig = {
-          ListenStream = waydim.socketPath;
-          RemoveOnStop = true;
-        };
+    systemd.user.sockets.waybright = {
+      description = "waybright daemon socket";
+      wantedBy = [ "graphical-session.target" ];
+      partOf = [ "graphical-session.target" ];
+      socketConfig = {
+        ListenStream = "%t/waybright.sock";
+        RemoveOnStop = true;
       };
+    };
 
-      systemd.user.services.waydim = {
-        description = "waydim hardware brightness daemon";
-        wantedBy = [ "graphical-session.target" ];
-        requires = [ "waydim.socket" ];
-        after = [
-          "graphical-session.target"
-          "waydim.socket"
-        ];
-        partOf = [ "graphical-session.target" ];
-
-        serviceConfig = {
-          ExecStart = "${waydim.package}/bin/waydim daemon";
-          Environment = [ "WAYDIM_SOCKET=${waydim.socketPath}" ];
-          Restart = "on-failure";
-        };
+    systemd.user.services.waybright = {
+      description = "Wayland brightness daemon";
+      wantedBy = [ "graphical-session.target" ];
+      requires = [ "waybright.socket" ];
+      after = [
+        "graphical-session.target"
+        "waybright.socket"
+      ];
+      partOf = [ "graphical-session.target" ];
+      serviceConfig = {
+        ExecStart = "${cfg.package}/bin/waybright daemon --hardware-min ${toString cfg.hardwareMin}";
+        Environment = [ "WAYBRIGHT_SOCKET=%t/waybright.sock" ];
+        Restart = "on-failure";
       };
-    })
-
-    (lib.mkIf waydark.enable {
-      systemd.user.sockets.waydark = {
-        description = "waydark daemon socket";
-        wantedBy = [ "sockets.target" ];
-
-        socketConfig = {
-          ListenStream = waydark.socketPath;
-          RemoveOnStop = true;
-        };
-      };
-
-      systemd.user.services.waydark = {
-        description = "waydark software dimming daemon";
-        wantedBy = [ "graphical-session.target" ];
-        requires = [ "waydark.socket" ];
-        after = [
-          "graphical-session.target"
-          "waydark.socket"
-        ];
-        partOf = [ "graphical-session.target" ];
-
-        serviceConfig = {
-          ExecStart = "${waydark.package}/bin/waydark daemon";
-          Environment = [ "WAYDARK_SOCKET=${waydark.socketPath}" ];
-          Restart = "on-failure";
-        };
-      };
-    })
-  ];
+    };
+  };
 }
