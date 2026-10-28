@@ -5,6 +5,28 @@ use std::{
     path::PathBuf,
 };
 
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum ClientError {
+    #[error("failed to resolve focused output")]
+    Focus(#[from] wayfocus::FocusError),
+    #[error("failed to connect to daemon at {}", path.display())]
+    Connect {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("daemon request failed: {0}")]
+    Daemon(String),
+    #[error("invalid daemon response")]
+    InvalidResponse(#[source] io::Error),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
+pub type Result<T> = std::result::Result<T, ClientError>;
+
 #[derive(Clone, Debug)]
 pub struct OutputState {
     pub name: String,
@@ -13,25 +35,40 @@ pub struct OutputState {
     pub software: Option<u8>,
 }
 
-pub fn list() -> io::Result<Vec<OutputState>> {
-    send("LIST")?.lines().map(parse_output).collect()
+pub fn list() -> Result<Vec<OutputState>> {
+    send("LIST")?
+        .lines()
+        .map(|line| parse_output(line).map_err(ClientError::InvalidResponse))
+        .collect()
 }
 
-pub fn get(selector: &str) -> io::Result<u8> {
-    validate_argument(selector)?;
-    send(&format!("GET {selector}"))?
+pub fn get(selector: &str) -> Result<u8> {
+    let selector = resolve_selector(selector)?;
+    validate_argument(&selector)?;
+    Ok(send(&format!("GET {selector}"))?
         .trim()
         .parse()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        .map_err(|error| {
+            ClientError::InvalidResponse(io::Error::new(io::ErrorKind::InvalidData, error))
+        })?)
 }
 
-pub fn set(selector: &str, change: &str) -> io::Result<()> {
-    validate_argument(selector)?;
+pub fn set(selector: &str, change: &str) -> Result<()> {
+    let selector = resolve_selector(selector)?;
+    validate_argument(&selector)?;
     validate_argument(change)?;
     expect_ok(send(&format!("SET {selector} {change}"))?)
 }
 
-pub fn refresh() -> io::Result<()> {
+fn resolve_selector(selector: &str) -> Result<String> {
+    if selector == "@focused" {
+        Ok(wayfocus::focused_output()?)
+    } else {
+        Ok(selector.to_owned())
+    }
+}
+
+pub fn refresh() -> Result<()> {
     expect_ok(send("REFRESH")?)
 }
 
@@ -45,15 +82,19 @@ pub fn socket_path() -> io::Result<PathBuf> {
     Ok(runtime_dir.join("waybright.sock"))
 }
 
-fn send(request: &str) -> io::Result<String> {
-    let mut stream = UnixStream::connect(socket_path()?)?;
+fn send(request: &str) -> Result<String> {
+    let socket_path = socket_path()?;
+    let mut stream = UnixStream::connect(&socket_path).map_err(|source| ClientError::Connect {
+        path: socket_path,
+        source,
+    })?;
     stream.write_all(request.as_bytes())?;
     stream.shutdown(std::net::Shutdown::Write)?;
 
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
     if let Some(error) = response.trim().strip_prefix("ERR ") {
-        return Err(io::Error::other(error.to_owned()));
+        return Err(ClientError::Daemon(error.to_owned()));
     }
     Ok(response)
 }
@@ -93,23 +134,24 @@ where
     }
 }
 
-fn expect_ok(response: String) -> io::Result<()> {
+fn expect_ok(response: String) -> Result<()> {
     if response.trim() == "OK" {
         Ok(())
     } else {
-        Err(io::Error::new(
+        Err(ClientError::InvalidResponse(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid daemon response",
-        ))
+        )))
     }
 }
 
-fn validate_argument(value: &str) -> io::Result<()> {
+fn validate_argument(value: &str) -> Result<()> {
     if value.is_empty() || value.chars().any(char::is_whitespace) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "request arguments must not contain whitespace",
-        ));
+        )
+        .into());
     }
     Ok(())
 }

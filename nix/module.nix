@@ -32,8 +32,7 @@ in
 
     systemd.user.sockets.waybright = {
       description = "waybright daemon socket";
-      wantedBy = [ "graphical-session.target" ];
-      partOf = [ "graphical-session.target" ];
+      wantedBy = [ "sockets.target" ];
       socketConfig = {
         ListenStream = "%t/waybright.sock";
         RemoveOnStop = true;

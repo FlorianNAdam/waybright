@@ -1,5 +1,6 @@
-use std::error::Error;
+use std::process::ExitCode;
 
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::{Map, json};
 use waybright::{client, daemon};
@@ -31,26 +32,41 @@ enum Command {
     Refresh,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("waybright: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     match Cli::parse().command {
-        Command::Daemon { hardware_min } => daemon::run(daemon::Config { hardware_min }),
-        Command::List { json } => list_outputs(json),
+        Command::Daemon { hardware_min } => {
+            daemon::run(daemon::Config { hardware_min }).context("brightness daemon failed")
+        }
+        Command::List { json } => list_outputs(json).context("failed to list outputs"),
         Command::Get { name } => {
-            println!("{}%", client::get(&name)?);
+            let brightness = client::get(&name)
+                .with_context(|| format!("failed to get brightness for {name}"))?;
+            println!("{brightness}%");
             Ok(())
         }
         Command::Set { name, percent } => {
-            client::set(&name, &percent)?;
+            client::set(&name, &percent)
+                .with_context(|| format!("failed to set brightness for {name}"))?;
             Ok(())
         }
         Command::Refresh => {
-            client::refresh()?;
+            client::refresh().context("failed to refresh brightness devices")?;
             Ok(())
         }
     }
 }
 
-fn list_outputs(as_json: bool) -> Result<(), Box<dyn Error>> {
+fn list_outputs(as_json: bool) -> Result<()> {
     let outputs = client::list()?;
     if as_json {
         let values = outputs

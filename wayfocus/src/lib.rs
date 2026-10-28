@@ -1,4 +1,6 @@
-use std::{env, io, process::Command};
+use std::{env, io, process::Command, string::FromUtf8Error};
+
+use thiserror::Error;
 
 mod hyprland;
 mod kwin;
@@ -13,6 +15,42 @@ pub enum Compositor {
     Kwin,
     Unknown,
 }
+
+#[derive(Debug, Error)]
+pub enum FocusError {
+    #[error("failed to run {command}")]
+    Command {
+        command: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("{command} exited with status {status}: {stderr}")]
+    CommandFailed {
+        command: String,
+        status: std::process::ExitStatus,
+        stderr: String,
+    },
+    #[error("{command} returned invalid UTF-8")]
+    InvalidUtf8 {
+        command: String,
+        #[source]
+        source: FromUtf8Error,
+    },
+    #[error("invalid response from {compositor}")]
+    InvalidResponse {
+        compositor: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("{compositor} reported no focused output")]
+    NoFocusedOutput { compositor: &'static str },
+    #[error("failed to query KWin")]
+    Kwin(#[source] dbus::Error),
+    #[error("focused output is only supported on sway, hyprland, niri, and kwin")]
+    Unsupported,
+}
+
+pub type Result<T> = std::result::Result<T, FocusError>;
 
 pub fn detect_compositor() -> Compositor {
     if env::var_os("SWAYSOCK").is_some() {
@@ -37,7 +75,7 @@ pub fn detect_compositor() -> Compositor {
     Compositor::Unknown
 }
 
-pub fn focused_output() -> io::Result<String> {
+pub fn focused_output() -> Result<String> {
     match detect_compositor() {
         Compositor::Sway => return sway::focused_output(),
         Compositor::Hyprland => return hyprland::focused_output(),
@@ -50,12 +88,7 @@ pub fn focused_output() -> io::Result<String> {
         .or_else(|_| hyprland::focused_output())
         .or_else(|_| niri::focused_output())
         .or_else(|_| kwin::focused_output())
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "focused output is only supported on sway, hyprland, niri, and kwin",
-            )
-        })
+        .map_err(|_| FocusError::Unsupported)
 }
 
 fn env_contains(name: &str, value: &str) -> bool {
@@ -64,15 +97,29 @@ fn env_contains(name: &str, value: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn command_output(command: &str, args: &[&str]) -> io::Result<String> {
-    let output = Command::new(command).args(args).output()?;
+pub(crate) fn command_output(command: &str, args: &[&str]) -> Result<String> {
+    let invocation = std::iter::once(command)
+        .chain(args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let output = Command::new(command)
+        .args(args)
+        .output()
+        .map_err(|source| FocusError::Command {
+            command: invocation.clone(),
+            source,
+        })?;
 
     if !output.status.success() {
-        return Err(io::Error::other(format!(
-            "{command} exited with status {}",
-            output.status
-        )));
+        return Err(FocusError::CommandFailed {
+            command: invocation,
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
     }
 
-    String::from_utf8(output.stdout).map_err(io::Error::other)
+    String::from_utf8(output.stdout).map_err(|source| FocusError::InvalidUtf8 {
+        command: invocation,
+        source,
+    })
 }

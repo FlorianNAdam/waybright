@@ -1,8 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env,
-    error::Error,
-    fs,
+    env, fs,
     io::{self, Read, Write},
     os::fd::FromRawFd,
     os::unix::net::{UnixListener, UnixStream},
@@ -42,7 +40,7 @@ struct OutputState {
     software: Option<u8>,
 }
 
-pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
+pub fn run(config: Config) -> anyhow::Result<()> {
     validate_hardware_min(config.hardware_min)?;
     let mut state = DaemonState::new(config.hardware_min)?;
     let (listener, socket_path) = daemon_listener()?;
@@ -144,19 +142,18 @@ impl DaemonState {
     }
 
     fn get(&self, selector: &str) -> io::Result<u8> {
-        let name = resolve_selector(selector)?;
-        if name == "@all" {
+        if selector == "@all" {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "@all is not valid for get",
             ));
         }
-        let hardware = self.hardware_brightness.get(&name).copied();
+        let hardware = self.hardware_brightness.get(selector).copied();
         let software = self
             .overlays
             .as_ref()
-            .and_then(|overlays| overlays.brightness(&name));
-        combined_brightness(&name, hardware, software, self.hardware_min)
+            .and_then(|overlays| overlays.brightness(selector));
+        combined_brightness(selector, hardware, software, self.hardware_min)
     }
 
     fn set(&mut self, selector: &str, change: PercentChange) -> io::Result<()> {
@@ -172,7 +169,7 @@ impl DaemonState {
             return Ok(());
         }
 
-        self.set_one(&resolve_selector(selector)?, change)
+        self.set_one(selector, change)
     }
 
     fn set_one(&mut self, name: &str, change: PercentChange) -> io::Result<()> {
@@ -268,14 +265,6 @@ fn combined_brightness(
         (Some(hardware), None) => Ok(hardware.clamp(0, 100) as u8),
         (None, Some(software)) => Ok(software),
         (None, None) => Err(not_found(name)),
-    }
-}
-
-fn resolve_selector(selector: &str) -> io::Result<String> {
-    if selector == "@focused" {
-        wayfocus::focused_output()
-    } else {
-        Ok(selector.to_owned())
     }
 }
 
