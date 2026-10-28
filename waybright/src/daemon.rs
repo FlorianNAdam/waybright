@@ -181,16 +181,28 @@ impl DaemonState {
         let current = combined_brightness(name, hardware, software, self.hardware_min)?;
         let target = apply_percent_change(current, change);
 
-        match (hardware, software) {
+        let (hardware_target, software_target) = match (hardware, software) {
             (Some(_), Some(_)) => {
                 let (hardware, software) = split_brightness(target, self.hardware_min);
-                self.set_hardware(name, hardware)?;
-                self.set_software(name, software)?;
+                (Some(hardware), Some(software))
             }
-            (Some(_), None) => self.set_hardware(name, target)?,
-            (None, Some(_)) => self.set_software(name, target)?,
-            (None, None) => unreachable!(),
+            (Some(_), None) => (Some(target), None),
+            (None, Some(_)) => (None, Some(target)),
+            (None, None) => return Err(not_found(name)),
+        };
+
+        if let Some(target) = hardware_target
+            && hardware != Some(u32::from(target))
+        {
+            self.set_hardware(name, target)?;
         }
+
+        if let Some(target) = software_target
+            && software != Some(target)
+        {
+            self.set_software(name, target)?;
+        }
+
         Ok(())
     }
 

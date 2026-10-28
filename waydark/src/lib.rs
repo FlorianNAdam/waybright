@@ -182,6 +182,9 @@ impl OverlayManager {
                 "brightness must be between 0 and 100",
             ));
         }
+        if name != "@all" && self.brightness(name) == Some(brightness) {
+            return Ok(());
+        }
         self.state.set_brightness(name, brightness, &self.qh)
     }
 }

@@ -99,6 +99,7 @@
               rustfmt
               wayland
               libxkbcommon
+              libGL
               eudev
               dbus
             ];
@@ -112,6 +113,15 @@
               ++ (with pkgs; [
                 rust-analyzer
               ]);
+
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
+              with pkgs;
+              [
+                wayland
+                libxkbcommon
+                libGL
+              ]
+            );
           };
         };
     };
